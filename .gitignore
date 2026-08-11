@@ -1,0 +1,33 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+.dev.vars
+.secrets/
+credentials.json
+token.json
+
+# Python environments, caches, and runtime state
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+campaign_state/
+
+# JavaScript dependencies and build output
+node_modules/
+.next/
+.vinext/
+.vercel/
+.wrangler/
+dist/
+outputs/
+work/
+coverage/
+next-env.d.ts
+*.tsbuildinfo
+
+# Local operating-system and tool files
+.DS_Store
+Thumbs.db
+*.log
