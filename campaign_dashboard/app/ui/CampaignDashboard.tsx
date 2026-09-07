@@ -261,20 +261,6 @@ type ImportPreviewRow = Omit<
 > & {
   selected: boolean;
 };
-type LinkedInStatus = {
-  connected: boolean;
-  profile?: {
-    sub: string;
-    name: string;
-    given_name: string;
-    family_name: string;
-    picture: string;
-    email: string;
-    email_verified: boolean;
-  };
-  expires_at?: string;
-};
-
 const initialData: DashboardData = {
   leads: [],
   campaigns: [],
@@ -318,11 +304,6 @@ export function CampaignDashboard() {
   const [leadDraft, setLeadDraft] = useState("");
   const [leadBatchLabel, setLeadBatchLabel] = useState("");
   const [saving, setSaving] = useState(false);
-  const [linkedin, setLinkedin] = useState<LinkedInStatus>({
-    connected: false,
-  });
-  const [linkedinLoading, setLinkedinLoading] = useState(true);
-
   async function loadData() {
     setLoading(true);
     setError("");
@@ -362,31 +343,7 @@ export function CampaignDashboard() {
     // Initial workspace synchronization; later refreshes are user initiated.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadData();
-    fetch("/api/linkedin/status", { cache: "no-store" })
-      .then((response) => response.json())
-      .then((status: LinkedInStatus) => setLinkedin(status))
-      .catch(() => setLinkedin({ connected: false }))
-      .finally(() => setLinkedinLoading(false));
-
-    const url = new URL(window.location.href);
-    if (url.searchParams.get("linkedin") === "connected") {
-      setNotice("LinkedIn account connected successfully.");
-      url.searchParams.delete("linkedin");
-      window.history.replaceState({}, "", `${url.pathname}${url.search}`);
-    }
-    const linkedinError = url.searchParams.get("linkedin_error");
-    if (linkedinError) {
-      setError(linkedinError);
-      url.searchParams.delete("linkedin_error");
-      window.history.replaceState({}, "", `${url.pathname}${url.search}`);
-    }
   }, []);
-
-  async function disconnectLinkedIn() {
-    await fetch("/api/linkedin/status", { method: "DELETE" });
-    setLinkedin({ connected: false });
-    setNotice("LinkedIn account disconnected.");
-  }
 
   const metrics = useMemo(() => {
     const sent = data.logs.filter((log) => log.status === "sent").length;
@@ -669,38 +626,6 @@ export function CampaignDashboard() {
           <div>
             <span className="eyebrow">{titles[tab][0]}</span>
             <h1>{titles[tab][1]}</h1>
-          </div>
-          <div className="topbar-actions">
-            {linkedinLoading ? (
-              <span className="linkedin-loading">Checking LinkedIn…</span>
-            ) : linkedin.connected ? (
-              <div className="linkedin-connected">
-                {linkedin.profile?.picture ? (
-                  <img
-                    src={linkedin.profile.picture}
-                    alt=""
-                    referrerPolicy="no-referrer"
-                  />
-                ) : (
-                  <span className="linkedin-mark">in</span>
-                )}
-                <span>
-                  <strong>{linkedin.profile?.name || "LinkedIn connected"}</strong>
-                  <small>Connected</small>
-                </span>
-                <button onClick={disconnectLinkedIn} aria-label="Disconnect LinkedIn">
-                  ×
-                </button>
-              </div>
-            ) : (
-              <a className="linkedin-button" href="/api/linkedin/connect">
-                <span className="linkedin-mark">in</span>
-                Connect LinkedIn
-              </a>
-            )}
-            <button className="primary-button" onClick={openComposer}>
-              <span>＋</span> New campaign
-            </button>
           </div>
         </header>
 
@@ -2991,6 +2916,10 @@ function Campaigns({
     null,
   );
   const [removingKey, setRemovingKey] = useState("");
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [deletingCampaignId, setDeletingCampaignId] = useState<string | null>(
+    null,
+  );
 
   async function copyCampaignId(campaignId: string) {
     await navigator.clipboard.writeText(campaignId);
@@ -3034,6 +2963,37 @@ function Campaigns({
       );
     } finally {
       setRemovingKey("");
+    }
+  }
+
+  async function deleteCampaign(campaign: Campaign) {
+    setDeletingCampaignId(campaign.id);
+    setError("");
+    try {
+      const response = await fetch(
+        `/api/campaigns?id=${encodeURIComponent(campaign.id)}`,
+        { method: "DELETE" },
+      );
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "Unable to delete this campaign.");
+      }
+      setDeleteConfirmId(null);
+      setExpandedCampaignId((current) =>
+        current === campaign.id ? null : current,
+      );
+      setNotice(
+        `Campaign “${campaign.title}” was deleted. Workers will skip it on their next database check.`,
+      );
+      await onUpdated();
+    } catch (deleteError) {
+      setError(
+        deleteError instanceof Error
+          ? deleteError.message
+          : "Unable to delete this campaign.",
+      );
+    } finally {
+      setDeletingCampaignId(null);
     }
   }
 
@@ -3102,6 +3062,44 @@ function Campaigns({
                   >
                     {expanded ? "Hide recipients" : "Manage recipients"}
                   </button>
+                  <button
+                    type="button"
+                    className="text-button danger campaign-id-button"
+                    disabled={Boolean(deletingCampaignId)}
+                    onClick={() => setDeleteConfirmId(campaign.id)}
+                  >
+                    Delete campaign
+                  </button>
+                  {deleteConfirmId === campaign.id && (
+                    <span className="campaign-delete-confirm" role="alert">
+                      <strong>Delete this campaign permanently?</strong>
+                      <small>
+                        Its recipients, sequence, delivery history, and worker
+                        reports will also be removed. Messages already sent cannot
+                        be recalled.
+                      </small>
+                      <span>
+                        <button
+                          type="button"
+                          className="secondary-button danger-button"
+                          disabled={Boolean(deletingCampaignId)}
+                          onClick={() => void deleteCampaign(campaign)}
+                        >
+                          {deletingCampaignId === campaign.id
+                            ? "Deleting…"
+                            : "Delete permanently"}
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={Boolean(deletingCampaignId)}
+                          onClick={() => setDeleteConfirmId(null)}
+                        >
+                          Cancel
+                        </button>
+                      </span>
+                    </span>
+                  )}
                 </span>
                 <span>
                   {activeAssignments.length} active / {assignments.length} total

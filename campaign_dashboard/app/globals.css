@@ -2257,6 +2257,30 @@ h2 {
   text-align: left;
 }
 
+.campaign-delete-confirm {
+  display: grid;
+  width: min(360px, 100%);
+  gap: 7px;
+  margin-top: 7px;
+  padding: 12px;
+  border: 1px solid #d8aaa2;
+  border-radius: 12px;
+  background: #fff7f5;
+  color: var(--ink);
+}
+
+.campaign-delete-confirm > small {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.campaign-delete-confirm > span {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+
 .campaign-recipient-panel {
   padding: 18px 24px 22px;
   border-top: 1px solid var(--line);

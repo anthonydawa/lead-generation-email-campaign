@@ -2,6 +2,58 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseRequest } from "../../lib/supabase-admin";
 import { ensureDefaultEmailFooter } from "../../lib/email-content";
 
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export async function DELETE(request: NextRequest) {
+  const campaignId = request.nextUrl.searchParams.get("id")?.trim() || "";
+  if (!UUID_PATTERN.test(campaignId)) {
+    return NextResponse.json(
+      { error: "A valid campaign ID is required." },
+      { status: 400 },
+    );
+  }
+
+  try {
+    const existing = await supabaseRequest<
+      Array<{ id: string; title: string }>
+    >(
+      `campaigns?select=id,title&id=eq.${encodeURIComponent(campaignId)}&limit=1`,
+    );
+    const campaign = existing[0];
+    if (!campaign) {
+      return NextResponse.json(
+        { error: "Campaign not found." },
+        { status: 404 },
+      );
+    }
+
+    const deleted = await supabaseRequest<Array<{ id: string }>>(
+      `campaigns?id=eq.${encodeURIComponent(campaignId)}&select=id`,
+      {
+        method: "DELETE",
+        prefer: "return=representation",
+      },
+    );
+    if (!deleted.length) {
+      return NextResponse.json(
+        { error: "Campaign was not deleted." },
+        { status: 409 },
+      );
+    }
+
+    return NextResponse.json({ id: campaign.id, title: campaign.title });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error ? error.message : "Unable to delete campaign",
+      },
+      { status: 500 },
+    );
+  }
+}
+
 export async function POST(request: NextRequest) {
   let campaignId: string | null = null;
   try {
