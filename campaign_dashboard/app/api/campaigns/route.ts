@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseRequest } from "../../lib/supabase-admin";
+import { ensureDefaultEmailFooter } from "../../lib/email-content";
 
 export async function POST(request: NextRequest) {
   let campaignId: string | null = null;
@@ -7,7 +8,8 @@ export async function POST(request: NextRequest) {
     const payload = (await request.json()) as CampaignInput;
     const title = payload.title?.trim();
     const subject = payload.subject_template?.trim();
-    const body = payload.body_template?.trim();
+    const bodyDraft = payload.body_template?.trim();
+    const body = bodyDraft ? ensureDefaultEmailFooter(bodyDraft) : "";
     const leadIds = [...new Set(payload.lead_ids ?? [])];
     const initialSendAt = payload.initial_send_at?.trim();
     const timezone = payload.timezone?.trim() || "UTC";
@@ -16,7 +18,9 @@ export async function POST(request: NextRequest) {
     const followups = [...(payload.followups ?? [])]
       .map((step) => ({
         delay_days: Number(step.delay_days),
-        body_template: step.body_template?.trim(),
+        body_template: step.body_template?.trim()
+          ? ensureDefaultEmailFooter(step.body_template)
+          : "",
       }))
       .sort((a, b) => a.delay_days - b.delay_days);
 

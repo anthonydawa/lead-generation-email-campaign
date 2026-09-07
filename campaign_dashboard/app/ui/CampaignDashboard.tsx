@@ -2,12 +2,19 @@
 
 import {
   ChangeEvent,
+  ClipboardEvent,
   FormEvent,
   Fragment,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
+import {
+  ensureDefaultEmailFooter,
+  personalizeEmailHtml,
+  stripManagedEmailFooter,
+} from "../lib/email-content";
 
 type Tab = "overview" | "finder" | "library" | "stats" | "campaigns";
 type Lead = {
@@ -3248,6 +3255,7 @@ function CampaignComposer({
   const [stage, setStage] = useState<"template" | "audience">("template");
   const [labelFilter, setLabelFilter] = useState("all");
   const [hidePreviouslySent, setHidePreviouslySent] = useState(true);
+  const [previewStep, setPreviewStep] = useState(0);
   const sentSet = new Set(sentLeadIds);
   const selectedTemplate = templates.find(
     (template) => template.id === selectedTemplateId,
@@ -3261,13 +3269,52 @@ function CampaignComposer({
   const selectableLeadIds = labelFilteredLeads
     .filter((lead) => !sentSet.has(lead.id))
     .map((lead) => lead.id);
+  const previewLead =
+    eligibleLeads.find((lead) => selectedLeadIds.includes(lead.id)) ||
+    eligibleLeads[0];
+  const previewMessages = [
+    { label: "Email 1", delay: "Initial email", body },
+    ...followups.map((followup, index) => ({
+      label: `Follow-up ${index + 1}`,
+      delay: `Day ${followup.delay_days}`,
+      body: followup.body_template,
+    })),
+  ];
+  const activePreviewIndex = Math.min(
+    previewStep,
+    Math.max(0, previewMessages.length - 1),
+  );
+  const activePreview = previewMessages[activePreviewIndex];
+  const previewRecipient = {
+    firstName: previewLead?.first_name,
+    company: previewLead?.company,
+  };
+  const previewSubject = personalizeEmailHtml(
+    activePreviewIndex > 0 && !subject.toLowerCase().startsWith("re:")
+      ? `Re: ${subject}`
+      : subject,
+    previewRecipient,
+  );
+  const previewBody = personalizeEmailHtml(
+    ensureDefaultEmailFooter(activePreview.body),
+    previewRecipient,
+  );
+  const previewRecipientName =
+    [previewLead?.first_name, previewLead?.last_name].filter(Boolean).join(" ") ||
+    "Jordan Lee";
+  const previewRecipientEmail = previewLead?.email || "jordan@example.com";
 
   function chooseTemplate(template: MessageTemplate) {
     setSelectedTemplateId(template.id);
     setTemplateName(template.name);
     setSubject(template.subject_template);
-    setBody(template.body_template);
-    setFollowups(template.followups || []);
+    setBody(stripManagedEmailFooter(template.body_template));
+    setFollowups(
+      (template.followups || []).map((followup) => ({
+        ...followup,
+        body_template: stripManagedEmailFooter(followup.body_template),
+      })),
+    );
     setSelectedLeadIds(
       selectedLeadIds.filter((leadId) => !sentLeadIds.includes(leadId)),
     );
@@ -3355,138 +3402,204 @@ function CampaignComposer({
                   </button>
                 )}
               </section>
-              <section className="template-editor">
-                <span className="eyebrow">New reusable template</span>
-                <label>
-                  Template name
-                  <input
-                    value={templateName}
-                    onChange={(event) => {
-                      setSelectedTemplateId("");
-                      setTemplateName(event.target.value);
-                    }}
-                    placeholder="Bookkeeping introduction"
-                  />
-                </label>
-                <label>
-                  Subject
-                  <input
-                    value={subject}
-                    onChange={(event) => {
-                      setSelectedTemplateId("");
-                      setSubject(event.target.value);
-                    }}
-                    required
-                  />
-                </label>
-                <label>
-                  HTML body
-                  <textarea
-                    className="body-editor"
-                    value={body}
-                    onChange={(event) => {
-                      setSelectedTemplateId("");
-                      setBody(event.target.value);
-                    }}
-                    required
-                  />
-                </label>
-                <section className="sequence-builder">
-            <div className="sequence-heading">
-              <div>
-                      <strong>Follow-up messages</strong>
-                      <span>These remain part of the saved template.</span>
-              </div>
-            </div>
-            {followups.map((followup, index) => (
-              <article className="followup-card" key={index}>
-                <div className="followup-title">
-                  <strong>Follow-up {index + 1}</strong>
-                  <button
-                    type="button"
-                    className="text-button danger"
-                    onClick={() => {
-                      setSelectedTemplateId("");
-                      setFollowups(
-                        followups.filter((_, itemIndex) => itemIndex !== index),
-                      );
-                    }}
-                  >
-                    Remove
-                  </button>
-                </div>
-                <label>
-                  Days after the first email
-                  <input
-                    type="number"
-                    min="1"
-                    max="365"
-                    value={followup.delay_days}
-                    onChange={(event) => {
-                      setSelectedTemplateId("");
-                      setFollowups(
-                        followups.map((item, itemIndex) =>
-                          itemIndex === index
-                            ? { ...item, delay_days: Number(event.target.value) }
-                            : item,
-                        ),
-                      );
-                    }}
-                  />
-                </label>
-                <label>
-                  Message
-                  <textarea
-                    value={followup.body_template}
-                    onChange={(event) => {
-                      setSelectedTemplateId("");
-                      setFollowups(
-                        followups.map((item, itemIndex) =>
-                          itemIndex === index
-                            ? { ...item, body_template: event.target.value }
-                            : item,
-                        ),
-                      );
-                    }}
-                  />
-                </label>
-              </article>
-            ))}
-            <button
-              type="button"
-              className="secondary-button add-followup"
-              onClick={() => {
-                setSelectedTemplateId("");
-                setFollowups([
-                  ...followups,
-                  {
-                    delay_days:
-                      Math.max(0, ...followups.map((item) => item.delay_days)) +
-                      3,
-                    body_template:
-                      "<p>Hi {{first_name}},</p><p>Wanted to follow up once more in case this is useful for {{company}}.</p>",
-                  },
-                ]);
-              }}
-            >
-              + Add follow-up
-            </button>
+              <div className="template-workbench">
+                <section className="template-editor">
+                  <span className="eyebrow">New reusable template</span>
+                  <label>
+                    Template name
+                    <input
+                      value={templateName}
+                      onChange={(event) => {
+                        setSelectedTemplateId("");
+                        setTemplateName(event.target.value);
+                      }}
+                      placeholder="Bookkeeping introduction"
+                    />
+                  </label>
+                  <label>
+                    Subject
+                    <input
+                      value={subject}
+                      onChange={(event) => {
+                        setSelectedTemplateId("");
+                        setSubject(event.target.value);
+                      }}
+                      required
+                    />
+                  </label>
+                  <div className="editor-field">
+                    <span>Message</span>
+                    <RichTextEditor
+                      value={body}
+                      ariaLabel="Initial email message"
+                      placeholder="Write your first email…"
+                      onChange={(value) => {
+                        setSelectedTemplateId("");
+                        setBody(value);
+                      }}
+                      onFocus={() => setPreviewStep(0)}
+                    />
+                  </div>
+                  <section className="sequence-builder">
+                    <div className="sequence-heading">
+                      <div>
+                        <strong>Follow-up messages</strong>
+                        <span>Each message stays in the same email thread.</span>
+                      </div>
+                    </div>
+                    {followups.map((followup, index) => (
+                      <article className="followup-card" key={index}>
+                        <div className="followup-title">
+                          <strong>Follow-up {index + 1}</strong>
+                          <button
+                            type="button"
+                            className="text-button danger"
+                            onClick={() => {
+                              setSelectedTemplateId("");
+                              setFollowups(
+                                followups.filter(
+                                  (_, itemIndex) => itemIndex !== index,
+                                ),
+                              );
+                            }}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                        <label>
+                          Days after the first email
+                          <input
+                            type="number"
+                            min="1"
+                            max="365"
+                            value={followup.delay_days}
+                            onChange={(event) => {
+                              setSelectedTemplateId("");
+                              setFollowups(
+                                followups.map((item, itemIndex) =>
+                                  itemIndex === index
+                                    ? {
+                                        ...item,
+                                        delay_days: Number(event.target.value),
+                                      }
+                                    : item,
+                                ),
+                              );
+                            }}
+                          />
+                        </label>
+                        <div className="editor-field">
+                          <span>Message</span>
+                          <RichTextEditor
+                            value={followup.body_template}
+                            ariaLabel={`Follow-up ${index + 1} message`}
+                            placeholder="Write your follow-up…"
+                            onChange={(value) => {
+                              setSelectedTemplateId("");
+                              setFollowups(
+                                followups.map((item, itemIndex) =>
+                                  itemIndex === index
+                                    ? { ...item, body_template: value }
+                                    : item,
+                                ),
+                              );
+                            }}
+                            onFocus={() => setPreviewStep(index + 1)}
+                          />
+                        </div>
+                      </article>
+                    ))}
+                    <button
+                      type="button"
+                      className="secondary-button add-followup"
+                      onClick={() => {
+                        setSelectedTemplateId("");
+                        setFollowups([
+                          ...followups,
+                          {
+                            delay_days:
+                              Math.max(
+                                0,
+                                ...followups.map((item) => item.delay_days),
+                              ) + 3,
+                            body_template:
+                              "<p>Hi {{first_name}},</p><p>Wanted to follow up once more in case this is useful for {{company}}.</p>",
+                          },
+                        ]);
+                        setPreviewStep(followups.length + 1);
+                      }}
+                    >
+                      + Add follow-up
+                    </button>
+                  </section>
+                  <div className="template-save-row">
+                    <p>
+                      Personalize with <code>{"{{first_name}}"}</code> and{" "}
+                      <code>{"{{company}}"}</code>. Your fixed footer is added
+                      automatically.
+                    </p>
+                    <button
+                      type="button"
+                      className="primary-button"
+                      disabled={templateSaving || !templateName.trim()}
+                      onClick={saveAndContinue}
+                    >
+                      {templateSaving ? "Saving…" : "Save template & continue"}
+                    </button>
+                  </div>
                 </section>
-                <div className="template-save-row">
-                  <p>
-                    Supports <code>{"{{first_name}}"}</code> and{" "}
-                    <code>{"{{company}}"}</code>
+                <section className="email-preview-panel" aria-label="Email preview">
+                  <div className="sequence-heading">
+                    <div>
+                      <strong>Email preview</strong>
+                      <span>Final message with personalization and footer.</span>
+                    </div>
+                    <span className="timezone-chip">Live</span>
+                  </div>
+                  <div className="preview-sequence-tabs" role="tablist" aria-label="Sequence preview">
+                    {previewMessages.map((message, index) => (
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={activePreviewIndex === index}
+                        className={activePreviewIndex === index ? "active" : ""}
+                        onClick={() => setPreviewStep(index)}
+                        key={`${message.label}-${index}`}
+                      >
+                        <strong>{message.label}</strong>
+                        <span>{message.delay}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="email-preview-window">
+                    <div className="email-preview-header">
+                      <span>
+                        <small>From</small>
+                        <strong>Anthony · AI Accounting Agency</strong>
+                      </span>
+                      <span>
+                        <small>To</small>
+                        <strong>
+                          {previewRecipientName} &lt;{previewRecipientEmail}&gt;
+                        </strong>
+                      </span>
+                      <span>
+                        <small>Subject</small>
+                        <strong>{previewSubject || "Your email subject"}</strong>
+                      </span>
+                    </div>
+                    <iframe
+                      title={`${activePreview.label} preview`}
+                      sandbox=""
+                      srcDoc={emailPreviewDocument(previewBody)}
+                    />
+                  </div>
+                  <p className="fixed-footer-note">
+                    The signature and compliance footer are locked and will be
+                    included in every sequence.
                   </p>
-                  <button
-                    type="button"
-                    className="primary-button"
-                    disabled={templateSaving || !templateName.trim()}
-                    onClick={saveAndContinue}
-                  >
-                    {templateSaving ? "Saving…" : "Save template & continue"}
-                  </button>
-                </div>
-              </section>
+                </section>
+              </div>
             </div>
           ) : (
             <div className="audience-stage">
@@ -3632,6 +3745,171 @@ function CampaignComposer({
       </div>
     </div>
   );
+}
+
+function RichTextEditor({
+  value,
+  onChange,
+  onFocus,
+  placeholder,
+  ariaLabel,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onFocus?: () => void;
+  placeholder: string;
+  ariaLabel: string;
+}) {
+  const editorRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (
+      editor &&
+      document.activeElement !== editor &&
+      editor.innerHTML !== value
+    ) {
+      editor.innerHTML = value;
+    }
+  }, [value]);
+
+  function runCommand(command: string, commandValue?: string) {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.focus();
+    document.execCommand(command, false, commandValue);
+    onChange(editor.innerHTML);
+  }
+
+  function addLink() {
+    const selection = window.getSelection();
+    const savedRange = selection?.rangeCount
+      ? selection.getRangeAt(0).cloneRange()
+      : null;
+    const input = window.prompt("Paste the link URL");
+    if (!input?.trim()) return;
+    const href = /^https?:\/\//i.test(input.trim())
+      ? input.trim()
+      : `https://${input.trim()}`;
+    editorRef.current?.focus();
+    if (savedRange && selection) {
+      selection.removeAllRanges();
+      selection.addRange(savedRange);
+    }
+    document.execCommand("createLink", false, href);
+    if (editorRef.current) onChange(editorRef.current.innerHTML);
+  }
+
+  function insertPlainText(event: ClipboardEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const text = event.clipboardData.getData("text/plain");
+    const safeHtml = text
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replace(/\r?\n/g, "<br>");
+    runCommand("insertHTML", safeHtml);
+  }
+
+  const buttons = [
+    { label: "Bold", text: "B", command: "bold", className: "bold" },
+    { label: "Italic", text: "I", command: "italic", className: "italic" },
+    {
+      label: "Underline",
+      text: "U",
+      command: "underline",
+      className: "underline",
+    },
+    {
+      label: "Bulleted list",
+      text: "• List",
+      command: "insertUnorderedList",
+      className: "",
+    },
+    {
+      label: "Numbered list",
+      text: "1. List",
+      command: "insertOrderedList",
+      className: "",
+    },
+  ];
+
+  return (
+    <div className="rich-text-editor">
+      <div className="editor-toolbar" role="toolbar" aria-label={`${ariaLabel} formatting`}>
+        {buttons.map((button) => (
+          <button
+            type="button"
+            className={button.className}
+            aria-label={button.label}
+            title={button.label}
+            onMouseDown={(event) => {
+              event.preventDefault();
+              runCommand(button.command);
+            }}
+            key={button.command}
+          >
+            {button.text}
+          </button>
+        ))}
+        <span className="toolbar-divider" />
+        <button
+          type="button"
+          aria-label="Add link"
+          title="Add link"
+          onMouseDown={(event) => {
+            event.preventDefault();
+            addLink();
+          }}
+        >
+          Link
+        </button>
+        <button
+          type="button"
+          aria-label="Clear formatting"
+          title="Clear formatting"
+          onMouseDown={(event) => {
+            event.preventDefault();
+            runCommand("removeFormat");
+          }}
+        >
+          Clear
+        </button>
+      </div>
+      <div
+        ref={editorRef}
+        className="rich-text-area"
+        contentEditable
+        suppressContentEditableWarning
+        role="textbox"
+        aria-label={ariaLabel}
+        aria-multiline="true"
+        data-placeholder={placeholder}
+        onFocus={onFocus}
+        onInput={(event) => onChange(event.currentTarget.innerHTML)}
+        onPaste={insertPlainText}
+        onDrop={(event) => event.preventDefault()}
+      />
+    </div>
+  );
+}
+
+function emailPreviewDocument(body: string) {
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      html { background: #ffffff; }
+      body { margin: 0; padding: 24px; color: #202124; background: #ffffff; font-family: Arial, Helvetica, sans-serif; }
+      p:first-child { margin-top: 0; }
+      a { color: #356859; }
+      img { max-width: 100%; }
+    </style>
+  </head>
+  <body>${body}</body>
+</html>`;
 }
 
 function Metric({
