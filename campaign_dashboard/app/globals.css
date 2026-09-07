@@ -387,7 +387,8 @@ h2 {
   transform: translateY(-1px);
 }
 
-.primary-button:disabled {
+.primary-button:disabled,
+.secondary-button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
   transform: none;
@@ -3318,7 +3319,8 @@ code {
   }
 
   .research-import-copy .file-button,
-  .research-import-copy .primary-button {
+  .research-import-copy .primary-button,
+  .research-import-copy .secondary-button {
     width: 100%;
     justify-content: center;
   }

@@ -1753,6 +1753,7 @@ function ResearchLeadImporter({
   const [fileName, setFileName] = useState("");
   const [batchLabel, setBatchLabel] = useState("");
   const [importing, setImporting] = useState(false);
+  const [syncing, setSyncing] = useState(false);
 
   function chooseFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -1837,6 +1838,35 @@ function ResearchLeadImporter({
     }
   }
 
+  async function syncMasterSheet() {
+    setSyncing(true);
+    setError("");
+    try {
+      const response = await fetch("/api/lead-import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sync_master_sheet: true }),
+      });
+      const payload = await response.json();
+      if (!response.ok)
+        throw new Error(payload.error || "Unable to sync the master Google Sheet.");
+      const rejected =
+        (payload.rejected_unverified || 0) + (payload.rejected_invalid || 0);
+      setNotice(
+        `Master sheet checked ${payload.sheet_rows || 0} rows. ${payload.imported} newly verified lead${payload.imported === 1 ? "" : "s"} added; ${payload.skipped_duplicates || 0} already in Relay or repeated email${payload.skipped_duplicates === 1 ? " was" : "s were"} skipped; ${rejected} unverified or invalid row${rejected === 1 ? " was" : "s were"} rejected.`,
+      );
+      await onImported();
+    } catch (syncError) {
+      setError(
+        syncError instanceof Error
+          ? syncError.message
+          : "Unable to sync the master Google Sheet.",
+      );
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   const selectedCount = preview.filter((row) => row.selected).length;
   const rejectedCount = preview.length - selectedCount;
   const previewRows = [
@@ -1847,13 +1877,21 @@ function ResearchLeadImporter({
     <section className="panel research-import-panel">
       <div className="research-import-copy">
         <span className="eyebrow">Research spreadsheet</span>
-        <h2>Upload your Lead Tracker</h2>
+        <h2>Sync or upload your Lead Tracker</h2>
         <p>
-          Download your master Google Sheet as CSV or TSV. Relay imports only
-          rows marked third-party email verified and rejects unverified, invalid,
-          or duplicate email addresses.
+          Sync the shared Master Leads Google Sheet directly, or upload a CSV or
+          TSV. Relay imports only rows marked third-party email verified and
+          rejects unverified, invalid, or duplicate email addresses.
         </p>
         <div className="import-actions">
+          <button
+            type="button"
+            className="primary-button"
+            disabled={syncing || importing}
+            onClick={syncMasterSheet}
+          >
+            {syncing ? "Syncing…" : "Sync master Google Sheet"}
+          </button>
           <label className="file-button">
             Choose CSV or TSV
             <input
@@ -1864,8 +1902,9 @@ function ResearchLeadImporter({
           </label>
           {preview.length > 0 && (
             <button
+              type="button"
               className="primary-button"
-              disabled={importing || !selectedCount}
+              disabled={importing || syncing || !selectedCount}
               onClick={importSelected}
             >
               {importing

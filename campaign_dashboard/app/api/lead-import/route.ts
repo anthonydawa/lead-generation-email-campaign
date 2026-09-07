@@ -8,6 +8,11 @@ import {
   insertLeadsSkippingDuplicates,
   type LeadInsertRecord,
 } from "../../lib/lead-insert";
+import {
+  MASTER_LEAD_SHEET_NAME,
+  masterLeadSheetCsvUrl,
+  parseMasterLeadSheetCsv,
+} from "../../lib/master-lead-sheet";
 
 export const dynamic = "force-dynamic";
 
@@ -37,7 +42,11 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const input = (await request.json()) as ImportInput;
-    const rows = (input.rows || []).slice(0, 5000);
+    const masterSheetSync = input.sync_master_sheet === true;
+    const sourceRows = masterSheetSync
+      ? await fetchMasterLeadSheet()
+      : input.rows || [];
+    const rows = sourceRows.slice(0, 5000);
     if (!rows.length) {
       return NextResponse.json(
         { error: "Choose at least one spreadsheet row to import." },
@@ -62,16 +71,18 @@ export async function POST(request: NextRequest) {
     );
     const rejectedInvalid = rows.length - structurallyValid.length;
     const rejectedUnverified = structurallyValid.length - verifiedCandidates.length;
-    const batchLabel =
-      clean(input.batch_label, 120) ||
-      clean(input.source_file, 255) ||
-      "Uploaded spreadsheet";
+    const sourceFile = masterSheetSync
+      ? `${MASTER_LEAD_SHEET_NAME} / Leads`
+      : clean(input.source_file, 255) || "uploaded-spreadsheet.csv";
+    const batchLabel = masterSheetSync
+      ? `Master Google Sheet sync · ${new Date().toISOString().slice(0, 10)}`
+      : clean(input.batch_label, 120) || sourceFile || "Uploaded spreadsheet";
     const batches = await supabaseRequest<Array<{ id: string }>>(
       "lead_import_batches",
       {
         method: "POST",
         body: JSON.stringify({
-          source_file: clean(input.source_file, 255) || "uploaded-spreadsheet.csv",
+          source_file: sourceFile,
           label: batchLabel,
           total_rows: rows.length,
           imported_rows: 0,
@@ -114,8 +125,7 @@ export async function POST(request: NextRequest) {
               acceptedRows.map((row) => ({
                 ...stripImportOnlyFields(row),
                 import_batch_id: batchId,
-                source_file:
-                  clean(input.source_file, 255) || "uploaded-spreadsheet.csv",
+                source_file: sourceFile,
                 batch_label: batchLabel,
                 updated_at: new Date().toISOString(),
               })),
@@ -138,6 +148,8 @@ export async function POST(request: NextRequest) {
       verified_contacts: acceptedRows.length,
       queued_for_validation: 0,
       queued_for_find_email: 0,
+      sync_source: masterSheetSync ? MASTER_LEAD_SHEET_NAME : null,
+      sheet_rows: masterSheetSync ? rows.length : null,
     });
   } catch (error) {
     const message =
@@ -155,6 +167,24 @@ export async function POST(request: NextRequest) {
       { status: setupRequired ? 503 : 500 },
     );
   }
+}
+
+async function fetchMasterLeadSheet(): Promise<ImportRow[]> {
+  const response = await fetch(masterLeadSheetCsvUrl(), {
+    cache: "no-store",
+    redirect: "follow",
+    signal: AbortSignal.timeout(25_000),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `Unable to read the master Google Sheet (${response.status}). Check that link sharing still allows viewing.`,
+    );
+  }
+  const csv = await response.text();
+  if (csv.length > 10_000_000) {
+    throw new Error("The master Google Sheet is too large to sync safely.");
+  }
+  return parseMasterLeadSheetCsv(csv);
 }
 
 async function promoteEmailContacts(
@@ -309,6 +339,7 @@ type ImportInput = {
   source_file?: string;
   batch_label?: string;
   rows?: ImportRow[];
+  sync_master_sheet?: boolean;
 };
 
 type ImportRow = {
