@@ -21,6 +21,8 @@ class ReplyChecker:
         self._last_uid = 0
         self._last_refresh = 0.0
         self._replies_by_parent: dict[str, set[str]] = {}
+        self._last_bounce_refresh = 0.0
+        self._hard_bounced: set[str] = set()
 
     def test_connection(self) -> None:
         with self._client() as client:
@@ -51,6 +53,95 @@ class ReplyChecker:
             expected in self._replies_by_parent.get(self._normalize_id(message_id), set())
             for message_id in message_ids
         )
+
+    def hard_bounced_recipients(self, candidates: set[str]) -> set[str]:
+        """Find permanent delivery failures without changing the Lark mailbox.
+
+        Only notices from a mailer daemon with a permanent-failure signal are
+        accepted. Candidate addresses scope the result to active campaign leads,
+        preventing quoted addresses in unrelated email from being stopped.
+        """
+
+        normalized_candidates = {value.strip().lower() for value in candidates if value}
+        if not normalized_candidates:
+            return set()
+        now = time.monotonic()
+        if now - self._last_bounce_refresh >= 300:
+            self._refresh_hard_bounces()
+        return self._hard_bounced.intersection(normalized_candidates)
+
+    def _refresh_hard_bounces(self) -> None:
+        with self._client() as client:
+            status, _ = client.select(self.settings.imap_inbox_folder, readonly=True)
+            if status != "OK":
+                raise RuntimeError("IMAP could not open the configured inbox read-only")
+            # Lark does not reliably support a daemon FROM search, so inspect a
+            # bounded recent window with BODY.PEEK. This neither downloads nor
+            # changes normal campaign-thread message state.
+            uids = self._search(client, "ALL")[-500:]
+            for uid in uids:
+                status, data = client.uid("fetch", uid, "(BODY.PEEK[])")
+                if status != "OK":
+                    raise RuntimeError("IMAP could not fetch delivery notice")
+                for item in data or []:
+                    if not isinstance(item, tuple) or not item[1]:
+                        continue
+                    message = message_from_bytes(item[1], policy=default)
+                    sender = str(message.get("From", "")).lower()
+                    if not any(
+                        marker in sender
+                        for marker in ("mailer-daemon", "mail delivery subsystem")
+                    ):
+                        continue
+                    text = "\n".join(
+                        [
+                            str(message.get("Subject", "")),
+                            str(message.get("X-Failed-Recipients", "")),
+                            self._message_text(message),
+                        ]
+                    )
+                    if not self._is_hard_bounce(text):
+                        continue
+                    self._hard_bounced.update(self._email_addresses(text))
+        self._last_bounce_refresh = time.monotonic()
+
+    @staticmethod
+    def _message_text(message) -> str:
+        if message.is_multipart():
+            return "\n".join(
+                part.get_content()
+                for part in message.walk()
+                if part.get_content_maintype() == "text"
+            )
+        return str(message.get_content() or "")
+
+    @staticmethod
+    def _is_hard_bounce(value: str) -> bool:
+        normalized = value.lower()
+        return bool(
+            re.search(r"\b5[0-9][0-9]\b", normalized)
+            or any(
+                phrase in normalized
+                for phrase in (
+                    "address not found",
+                    "does not exist",
+                    "user unknown",
+                    "no such user",
+                    "recipient address rejected",
+                )
+            )
+        )
+
+    @staticmethod
+    def _email_addresses(value: str) -> set[str]:
+        return {
+            address.lower()
+            for address in re.findall(
+                r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+                value,
+                flags=re.IGNORECASE,
+            )
+        }
 
     def _refresh_reply_index(self) -> None:
         # Reuse one inbox scan for recipients checked close together. Lark's

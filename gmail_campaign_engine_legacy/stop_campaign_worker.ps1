@@ -24,4 +24,5 @@ if ($null -eq $process -or $process.CommandLine -notlike "*run_saved_campaign.py
 
 Stop-Process -Id $workerPid
 Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+New-Item -Path (Join-Path $PSScriptRoot "campaign_state\$CampaignId\stopped.flag") -ItemType File -Force | Out-Null
 Write-Output "Campaign worker $CampaignId stopped. Its CSV state is preserved."

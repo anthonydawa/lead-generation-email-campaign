@@ -488,6 +488,55 @@ class DatabaseClient:
             .execute()
         )
 
+    def upsert_worker_report(
+        self,
+        campaign_id: str,
+        worker_kind: str,
+        report_date: str,
+        values: dict[str, Any],
+    ) -> None:
+        """Publish one rolling daily snapshot for dashboard reporting."""
+
+        payload = {
+            "campaign_id": campaign_id,
+            "worker_kind": worker_kind,
+            "report_date": report_date,
+            **values,
+        }
+        (
+            self.client.table("campaign_worker_reports")
+            .upsert(
+                payload,
+                on_conflict="campaign_id,worker_kind,report_date",
+            )
+            .execute()
+        )
+
+    def get_campaign_delivery_counts(
+        self,
+        campaign_id: str,
+        day_started_at: datetime,
+    ) -> tuple[int, int]:
+        """Return all-time and current-day accepted-delivery counts."""
+
+        base = (
+            self.client.table("campaign_logs")
+            .select("id", count="exact")
+            .eq("campaign_id", campaign_id)
+            .eq("status", "sent")
+        )
+        total = base.limit(1).execute()
+        today = (
+            self.client.table("campaign_logs")
+            .select("id", count="exact")
+            .eq("campaign_id", campaign_id)
+            .eq("status", "sent")
+            .gte("sent_at", day_started_at.isoformat())
+            .limit(1)
+            .execute()
+        )
+        return int(total.count or 0), int(today.count or 0)
+
     def get_status_counts(self) -> dict[str, int]:
         """Return the operational counts used by the CLI status command."""
 

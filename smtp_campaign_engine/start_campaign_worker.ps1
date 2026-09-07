@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 $CampaignId = ([guid]$CampaignId).ToString()
 $projectDirectory = $PSScriptRoot
-$pythonExecutable = Join-Path $projectDirectory ".venv\Scripts\pythonw.exe"
+$pythonExecutable = Join-Path $projectDirectory ".venv\Scripts\python.exe"
 $workerScript = Join-Path $projectDirectory "run_saved_campaign.py"
 $stateDirectory = Join-Path $projectDirectory "campaign_state\$CampaignId"
 $pidPath = Join-Path $stateDirectory "worker.pid"
@@ -26,6 +26,8 @@ if (Test-Path -LiteralPath $pidPath) {
     }
     Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
 }
+
+Remove-Item -Path (Join-Path $stateDirectory "stopped.flag") -Force -ErrorAction SilentlyContinue
 
 $process = Start-Process `
     -FilePath $pythonExecutable `

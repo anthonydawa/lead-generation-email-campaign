@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import unittest
 from pathlib import Path
 from unittest.mock import ANY, Mock, patch
@@ -263,6 +264,26 @@ class SenderTests(unittest.TestCase):
 
 
 class GmailServiceTests(unittest.TestCase):
+    def test_hard_bounce_parser_requires_a_permanent_failure(self) -> None:
+        body = base64.urlsafe_b64encode(
+            b"Address not found. Your message wasn't delivered to bad@example.com."
+        ).decode("ascii")
+        messages_api = Mock()
+        messages_api.list.return_value.execute.return_value = {
+            "messages": [{"id": "bounce-1"}]
+        }
+        messages_api.get.return_value.execute.return_value = {
+            "payload": {"headers": [], "body": {"data": body}}
+        }
+        service = GmailService(make_settings(), service=Mock())
+        service.service.users.return_value.messages.return_value = messages_api
+
+        found = service.find_hard_bounce_recipients_since(
+            __import__("datetime").datetime.now(__import__("datetime").UTC)
+        )
+
+        self.assertEqual(found, {"bad@example.com"})
+
     def test_followup_supplies_thread_and_reply_headers(self) -> None:
         messages_api = Mock()
         messages_api.send.return_value.execute.return_value = {

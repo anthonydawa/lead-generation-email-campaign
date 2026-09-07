@@ -9,7 +9,7 @@ import {
   useState,
 } from "react";
 
-type Tab = "overview" | "finder" | "library" | "campaigns";
+type Tab = "overview" | "finder" | "library" | "stats" | "campaigns";
 type Lead = {
   id: string;
   email: string;
@@ -65,6 +65,31 @@ type MessageTemplate = {
   created_at: string;
   updated_at: string;
 };
+type WorkerReport = {
+  id: string;
+  campaign_id: string;
+  worker_kind: "gmail" | "lark_smtp";
+  worker_status: string;
+  sender_email: string | null;
+  report_date: string;
+  sent_today: number;
+  bounced_today: number;
+  replied_today: number;
+  errors_today: number;
+  deliveries_total: number;
+  recipients_total: number;
+  pending_total: number;
+  scheduled_total: number;
+  completed_total: number;
+  replied_total: number;
+  bounced_total: number;
+  skipped_total: number;
+  unsubscribed_total: number;
+  uncertain_total: number;
+  last_error: string | null;
+  last_seen_at: string;
+  updated_at: string;
+};
 type DashboardData = {
   leads: Lead[];
   campaigns: Campaign[];
@@ -72,6 +97,7 @@ type DashboardData = {
   assignments: Assignment[];
   steps: CampaignStep[];
   templates: MessageTemplate[];
+  workerReports: WorkerReport[];
 };
 type Prospect = {
   id?: string;
@@ -249,6 +275,7 @@ const initialData: DashboardData = {
   assignments: [],
   steps: [],
   templates: [],
+  workerReports: [],
 };
 
 export function CampaignDashboard() {
@@ -325,6 +352,8 @@ export function CampaignDashboard() {
   }
 
   useEffect(() => {
+    // Initial workspace synchronization; later refreshes are user initiated.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadData();
     fetch("/api/linkedin/status", { cache: "no-store" })
       .then((response) => response.json())
@@ -561,6 +590,7 @@ export function CampaignDashboard() {
     overview: ["Workspace pulse", "Good morning, Anthony."],
     finder: ["Lead intelligence", "Find the right people."],
     library: ["Saved audiences", "Your lead library."],
+    stats: ["Campaign intelligence", "Outreach performance."],
     campaigns: ["Email outreach", "Campaigns."],
   };
 
@@ -597,6 +627,12 @@ export function CampaignDashboard() {
             onClick={() => setTab("library")}
           />
           <p className="nav-label">Outreach</p>
+          <NavButton
+            label="Campaign stats"
+            icon="◫"
+            active={tab === "stats"}
+            onClick={() => setTab("stats")}
+          />
           <NavButton
             label="Email campaigns"
             icon="↗"
@@ -695,6 +731,8 @@ export function CampaignDashboard() {
             setNotice={setNotice}
             onImported={loadData}
           />
+        ) : tab === "stats" ? (
+          <CampaignStats data={data} />
         ) : tab === "campaigns" ? (
           <Campaigns
             data={data}
@@ -1578,6 +1616,8 @@ function LeadFinder({
   }
 
   useEffect(() => {
+    // Load the initial saved-prospect result set once on mount.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void search();
     // Initial result set only; later requests are initiated by the user.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2696,6 +2736,236 @@ function Overview({
   );
 }
 
+function CampaignStats({ data }: { data: DashboardData }) {
+  const latestByCampaign = new Map<string, WorkerReport>();
+  for (const report of data.workerReports) {
+    if (!latestByCampaign.has(report.campaign_id)) {
+      latestByCampaign.set(report.campaign_id, report);
+    }
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const todayReports = data.workerReports.filter(
+    (report) => report.report_date === today,
+  );
+  const sentToday = todayReports.reduce(
+    (total, report) => total + report.sent_today,
+    0,
+  );
+  const bouncedToday = todayReports.reduce(
+    (total, report) => total + report.bounced_today,
+    0,
+  );
+  const repliedToday = todayReports.reduce(
+    (total, report) => total + report.replied_today,
+    0,
+  );
+  const errorsToday = todayReports.reduce(
+    (total, report) => total + report.errors_today,
+    0,
+  );
+  const reached = data.assignments.filter((assignment) =>
+    ["sent", "replied", "bounced", "unsubscribed"].includes(assignment.status),
+  ).length;
+  const replied = data.assignments.filter(
+    (assignment) => assignment.status === "replied",
+  ).length;
+  const bounced = data.assignments.filter(
+    (assignment) => assignment.status === "bounced",
+  ).length;
+  const queued = data.assignments.filter(
+    (assignment) =>
+      assignment.status === "pending" ||
+      (assignment.status === "sent" && Boolean(assignment.next_send_at)),
+  ).length;
+  const deliveries = data.campaigns.reduce((total, campaign) => {
+    const reportCount = latestByCampaign.get(campaign.id)?.deliveries_total || 0;
+    const loadedLogCount = data.logs.filter(
+      (log) => log.campaign_id === campaign.id && log.status === "sent",
+    ).length;
+    return total + Math.max(reportCount, loadedLogCount);
+  }, 0);
+  const replyRate = reached ? Math.round((replied / reached) * 1000) / 10 : 0;
+  const bounceRate = reached ? Math.round((bounced / reached) * 1000) / 10 : 0;
+  const healthyWorkers = Array.from(latestByCampaign.values()).filter(
+    (report) => workerHealth(report).level === "healthy",
+  ).length;
+
+  const insight =
+    bounceRate >= 5
+      ? "Bounce rate is above 5%. Tighten verification and suppress risky domains before adding volume."
+      : replyRate < 2 && reached >= 20
+        ? "Delivery quality is stable, but replies are low. Test a sharper subject line and a more specific first paragraph."
+        : reached
+          ? "Delivery quality is in a healthy range. Keep comparing reply rate by campaign before scaling volume."
+          : "Once sending begins, Relay will surface delivery quality and reply-rate guidance here.";
+
+  return (
+    <div className="stats-page">
+      <section className="metric-grid stats-metric-grid">
+        <Metric label="Sent today" value={sentToday} detail="Accepted deliveries" accent />
+        <Metric label="Replies today" value={repliedToday} detail="Follow-ups stopped" />
+        <Metric label="Bounced today" value={bouncedToday} detail="Addresses restricted" />
+        <Metric label="Worker errors" value={errorsToday} detail="Retries or uncertain sends" />
+      </section>
+
+      <section className="stats-overview-grid">
+        <article className="panel stats-scorecard">
+          <div className="panel-heading">
+            <div>
+              <span className="eyebrow">Overall tally</span>
+              <h2>Campaign performance</h2>
+            </div>
+            <span className="stats-date">UTC day · {today}</span>
+          </div>
+          <div className="stats-kpis">
+            <StatsKpi label="All deliveries" value={deliveries} />
+            <StatsKpi label="Recipients reached" value={reached} />
+            <StatsKpi label="Reply rate" value={replyRate} suffix="%" />
+            <StatsKpi label="Bounce rate" value={bounceRate} suffix="%" />
+            <StatsKpi label="Still queued" value={queued} />
+            <StatsKpi
+              label="Workers reporting"
+              value={healthyWorkers}
+              suffix={`/${data.campaigns.filter((campaign) => campaign.status === "running").length}`}
+            />
+          </div>
+        </article>
+
+        <article className={`panel stats-insight ${bounceRate >= 5 ? "warning" : ""}`}>
+          <span className="eyebrow">What to improve</span>
+          <h2>{bounceRate >= 5 ? "Review list quality" : "Performance note"}</h2>
+          <p>{insight}</p>
+          <small>
+            Reply rate uses recipients reached. Bounce rate uses confirmed hard
+            bounces, and open tracking is intentionally not included.
+          </small>
+        </article>
+      </section>
+
+      <section className="panel stats-campaign-panel">
+        <div className="panel-heading">
+          <div>
+            <span className="eyebrow">Campaign tally</span>
+            <h2>Performance by campaign</h2>
+          </div>
+          <span className="stats-refresh-note">Workers report every 15 minutes</span>
+        </div>
+        <div className="stats-campaign-list">
+          {data.campaigns.map((campaign) => {
+            const assignments = data.assignments.filter(
+              (assignment) => assignment.campaign_id === campaign.id,
+            );
+            const campaignReached = assignments.filter((assignment) =>
+              ["sent", "replied", "bounced", "unsubscribed"].includes(
+                assignment.status,
+              ),
+            ).length;
+            const campaignReplies = assignments.filter(
+              (assignment) => assignment.status === "replied",
+            ).length;
+            const campaignBounces = assignments.filter(
+              (assignment) => assignment.status === "bounced",
+            ).length;
+            const report = latestByCampaign.get(campaign.id);
+            const health = workerHealth(report, campaign.status);
+            const campaignDeliveries = Math.max(
+              report?.deliveries_total || 0,
+              data.logs.filter(
+                (log) => log.campaign_id === campaign.id && log.status === "sent",
+              ).length,
+            );
+            const campaignReplyRate = campaignReached
+              ? Math.round((campaignReplies / campaignReached) * 1000) / 10
+              : 0;
+            const campaignBounceRate = campaignReached
+              ? Math.round((campaignBounces / campaignReached) * 1000) / 10
+              : 0;
+            return (
+              <article className="stats-campaign-row" key={campaign.id}>
+                <div className="stats-campaign-name">
+                  <strong>{campaign.title}</strong>
+                  <small>
+                    {report?.worker_kind === "gmail"
+                      ? "Gmail worker"
+                      : report?.worker_kind === "lark_smtp"
+                        ? "Lark SMTP worker"
+                        : campaign.status === "completed"
+                          ? "Historical campaign"
+                          : campaign.sender_email || "Worker not reported yet"}
+                  </small>
+                </div>
+                <StatsKpi label="Today" value={report?.sent_today || 0} />
+                <StatsKpi label="Deliveries" value={campaignDeliveries} />
+                <StatsKpi
+                  label="Reached"
+                  value={campaignReached}
+                  suffix={`/${assignments.length}`}
+                />
+                <StatsKpi label="Replies" value={campaignReplyRate} suffix="%" />
+                <StatsKpi label="Bounces" value={campaignBounceRate} suffix="%" />
+                <div className="worker-health">
+                  <span className={`health-dot ${health.level}`} />
+                  <span>
+                    <strong>{health.label}</strong>
+                    <small>
+                      {report
+                        ? `Last update ${formatRelativeTime(report.last_seen_at)}`
+                        : campaign.status === "completed"
+                          ? "Stored campaign totals"
+                          : "Waiting for first report"}
+                    </small>
+                  </span>
+                </div>
+              </article>
+            );
+          })}
+          {!data.campaigns.length && (
+            <p className="empty-copy">No campaigns are available to report yet.</p>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function StatsKpi({
+  label,
+  value,
+  suffix = "",
+}: {
+  label: string;
+  value: number;
+  suffix?: string;
+}) {
+  return (
+    <div className="stats-kpi">
+      <span>{label}</span>
+      <strong>
+        {value}
+        {suffix}
+      </strong>
+    </div>
+  );
+}
+
+function workerHealth(report?: WorkerReport, campaignStatus?: string) {
+  if (!report && campaignStatus === "completed") {
+    return { level: "complete", label: "Campaign complete" };
+  }
+  if (!report && ["draft", "staged", "scheduled"].includes(campaignStatus || "")) {
+    return { level: "complete", label: "Not started" };
+  }
+  if (!report) return { level: "missing", label: "Not reporting" };
+  if (["completed", "stopped"].includes(report.worker_status)) {
+    return { level: "complete", label: report.worker_status };
+  }
+  const ageMinutes = (Date.now() - new Date(report.last_seen_at).getTime()) / 60_000;
+  if (ageMinutes <= 30) return { level: "healthy", label: "Reporting" };
+  if (ageMinutes <= 26 * 60) return { level: "delayed", label: "Update delayed" };
+  return { level: "missing", label: "Worker offline" };
+}
+
 function Campaigns({
   data,
   onCreate,
@@ -3657,6 +3927,19 @@ function formatDate(value: string) {
     day: "numeric",
     year: "numeric",
   }).format(new Date(value));
+}
+
+function formatRelativeTime(value: string) {
+  const elapsedSeconds = Math.max(
+    0,
+    Math.round((Date.now() - new Date(value).getTime()) / 1000),
+  );
+  if (elapsedSeconds < 60) return "just now";
+  const minutes = Math.floor(elapsedSeconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }
 
 function minimumLocalSendTime() {

@@ -148,6 +148,7 @@ class CsvWorkerTests(unittest.TestCase):
         remote.get_campaign_lead_status.return_value = "sent"
         checker = Mock()
         checker.has_reply.return_value = True
+        checker.hard_bounced_recipients.return_value = set()
 
         result = CsvCampaignWorker(
             settings(), remote, mail, self.store, reply_checker=checker
@@ -172,6 +173,7 @@ class CsvWorkerTests(unittest.TestCase):
         mail = Mock()
         checker = Mock()
         checker.has_reply.side_effect = RuntimeError("mailbox unavailable")
+        checker.hard_bounced_recipients.return_value = set()
 
         remote = Mock()
         remote.get_campaign_lead_status.return_value = "sent"
@@ -182,6 +184,24 @@ class CsvWorkerTests(unittest.TestCase):
         self.assertEqual(result.sent, 0)
         self.assertEqual(self.store.recipients()[0]["status"], "scheduled")
         self.assertIn("reply check failed", self.store.recipients()[0]["last_error"])
+        mail.send_email.assert_not_called()
+
+    def test_hard_bounce_stops_recipient_before_any_delivery(self) -> None:
+        self.write_recipient()
+        mail = Mock()
+        remote = Mock()
+        checker = Mock()
+        checker.hard_bounced_recipients.return_value = {"lead@example.com"}
+
+        result = CsvCampaignWorker(
+            settings(), remote, mail, self.store, reply_checker=checker
+        ).run_once(datetime(2026, 8, 5, 12, tzinfo=UTC))
+
+        self.assertEqual(result.sent, 0)
+        self.assertEqual(self.store.recipients()[0]["status"], "bounced")
+        remote.mark_lead_stopped_by_email.assert_called_once_with(
+            "lead@example.com", "bounced"
+        )
         mail.send_email.assert_not_called()
 
     def test_saved_state_is_loaded_after_worker_recreation(self) -> None:

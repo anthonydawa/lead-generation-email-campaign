@@ -77,6 +77,7 @@ class CsvWorkerTests(unittest.TestCase):
 
     def worker(self, gmail: Mock) -> CsvCampaignWorker:
         remote = Mock()
+        gmail.find_hard_bounce_recipients_since.return_value = set()
         local_status = self.store.recipients()[0]["status"]
         remote.get_campaign_lead_status.return_value = (
             "sent" if local_status == "scheduled" else "pending"
@@ -159,6 +160,7 @@ class CsvWorkerTests(unittest.TestCase):
         )
         gmail = Mock()
         gmail.find_reply_senders_since.return_value = {"lead@example.com"}
+        gmail.find_hard_bounce_recipients_since.return_value = set()
         now = datetime(2026, 8, 5, 12, tzinfo=UTC)
 
         matched = self.worker(gmail).poll_replies(now)
@@ -167,6 +169,25 @@ class CsvWorkerTests(unittest.TestCase):
         self.assertEqual(self.store.recipients()[0]["status"], "replied")
         self.assertEqual(self.store.last_reply_scan_at(), now)
         gmail.thread_has_reply.assert_not_called()
+
+    def test_hard_bounce_stops_the_recipient_and_syncs_remote(self) -> None:
+        self.write_recipient(
+            status="scheduled",
+            last_sent_at="2026-08-05T10:00:00+00:00",
+            next_send_at="2026-08-10T10:00:00+00:00",
+        )
+        gmail = Mock()
+        gmail.find_reply_senders_since.return_value = set()
+        gmail.find_hard_bounce_recipients_since.return_value = {"lead@example.com"}
+        remote = Mock()
+        worker = CsvCampaignWorker(settings(), remote, gmail, self.store)
+
+        worker.poll_replies(datetime(2026, 8, 5, 12, tzinfo=UTC))
+
+        self.assertEqual(self.store.recipients()[0]["status"], "bounced")
+        remote.mark_lead_stopped_by_email.assert_called_once_with(
+            "lead@example.com", "bounced"
+        )
 
     def test_saved_state_is_loaded_after_worker_recreation(self) -> None:
         self.write_recipient(status="completed", next_send_at="")

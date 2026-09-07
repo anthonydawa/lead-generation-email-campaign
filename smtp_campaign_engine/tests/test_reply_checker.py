@@ -51,3 +51,11 @@ def test_reply_check_uses_read_only_selection_and_peek_headers() -> None:
         b"42",
         "(BODY.PEEK[HEADER.FIELDS (FROM IN-REPLY-TO REFERENCES)])",
     )
+
+
+def test_hard_bounce_parser_requires_mail_daemon_and_permanent_signal() -> None:
+    checker = ReplyChecker(settings())
+
+    assert checker._is_hard_bounce("Address not found: bad@example.com")
+    assert checker._email_addresses("bad@example.com.") == {"bad@example.com"}
+    assert not checker._is_hard_bounce("Temporary failure; please retry later")

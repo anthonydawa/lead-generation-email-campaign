@@ -62,6 +62,7 @@ RECIPIENT_FIELDS = [
     "updated_at",
 ]
 EVENT_FIELDS = ["timestamp", "event", "lead_id", "email", "step", "details"]
+REPORT_INTERVAL = timedelta(minutes=15)
 
 
 def utc_now() -> datetime:
@@ -191,7 +192,11 @@ class CsvCampaignStore:
                 }
             )
 
-        _atomic_write(self.campaign_path, CAMPAIGN_FIELDS, [campaign])
+        _atomic_write(
+            self.campaign_path,
+            CAMPAIGN_FIELDS,
+            [{"campaign_id": campaign_id, **campaign}],
+        )
         _atomic_write(self.steps_path, STEP_FIELDS, steps)
         _atomic_write(self.recipients_path, RECIPIENT_FIELDS, recipient_rows)
         self.event("state_created", details=f"Imported {len(recipient_rows)} recipients")
@@ -260,6 +265,36 @@ class CsvCampaignStore:
             and as_utc(row.get("timestamp"))
             and as_utc(row.get("timestamp")).date() == today  # type: ignore[union-attr]
         )
+
+    def activity_summary(self, now: datetime) -> dict[str, int]:
+        """Summarize local delivery events for the daily worker report."""
+
+        summary = {
+            "deliveries_total": 0,
+            "sent_today": 0,
+            "bounced_today": 0,
+            "replied_today": 0,
+            "errors_today": 0,
+        }
+        if not self.events_path.exists():
+            return summary
+        today = now.astimezone(UTC).date()
+        for row in _read_rows(self.events_path):
+            event = row.get("event") or ""
+            event_at = as_utc(row.get("timestamp"))
+            if event in {"sent", "recovered_sent"}:
+                summary["deliveries_total"] += 1
+            if event_at is None or event_at.date() != today:
+                continue
+            if event in {"sent", "recovered_sent"}:
+                summary["sent_today"] += 1
+            elif event in {"hard_bounce_detected", "recipient_rejected"}:
+                summary["bounced_today"] += 1
+            elif event == "reply_detected":
+                summary["replied_today"] += 1
+            elif event in {"retry_scheduled", "send_outcome_uncertain"}:
+                summary["errors_today"] += 1
+        return summary
 
     def queue_skip(self, email: str, reason: str) -> Path:
         """Queue a recipient removal without racing a running CSV worker."""
@@ -354,13 +389,16 @@ class CsvCampaignWorker:
         self.retry_seconds = retry_seconds
         self.send_gate = send_gate
         self.reply_checker = reply_checker
+        self._campaign_id: str | None = None
         self._campaign: dict[str, str] | None = None
         self._steps: list[dict[str, str]] | None = None
         self._sent_count_date = None
         self._sent_count = 0
+        self._last_report_at: datetime | None = None
 
     def start(self, campaign_id: str) -> None:
         self.store.bootstrap(self.remote, campaign_id)
+        self._campaign_id = campaign_id
         self._campaign = self.store.campaign()
         campaign_sender = str(self._campaign.get("sender_email") or "").strip().lower()
         if campaign_sender and campaign_sender != self.settings.sender_email.strip().lower():
@@ -371,6 +409,7 @@ class CsvCampaignWorker:
         self.remote.update_campaign_status(campaign_id, "running")
         self._steps = self.store.steps()
         self.store.event("worker_started", details="Campaign marked running in Supabase")
+        self._publish_report(self.store.recipients(), utc_now(), force=True)
 
     def run_forever(self, campaign_id: str) -> None:
         self.start(campaign_id)
@@ -389,6 +428,9 @@ class CsvCampaignWorker:
                 self.remote.update_campaign_status(campaign_id, remote_status)
                 event = "campaign_needs_review" if has_uncertain else "campaign_completed"
                 self.store.event(event)
+                self._publish_report(
+                    self.store.recipients(), now, status=remote_status, force=True
+                )
                 LOGGER.info("Campaign ended with status %s", remote_status)
                 return
 
@@ -412,6 +454,10 @@ class CsvCampaignWorker:
         self._campaign = campaign
         self._steps = steps
         rows = self.store.recipients()
+
+        self._apply_hard_bounces(rows, now)
+
+        self._publish_report(rows, now)
 
         if self._mark_interrupted_attempts(rows, now):
             self.store.save_recipients(rows)
@@ -554,6 +600,46 @@ class CsvCampaignWorker:
             permit.mark_sent(now)
         self._finish_send(rows, recipient, steps, step_number, sent, now, "sent")
         return CycleResult(sent=1, next_due_at=self._next_due(rows))
+
+    def _apply_hard_bounces(self, rows: list[dict[str, str]], now: datetime) -> None:
+        """Stop local and online campaign work for confirmed Lark hard bounces."""
+
+        if self.reply_checker is None:
+            return
+        active = [row for row in rows if row["status"] in ACTIVE_STATUSES]
+        try:
+            bounced = self.reply_checker.hard_bounced_recipients(
+                {row["email"] for row in active}
+            )
+        except Exception as exc:
+            LOGGER.warning("Read-only hard-bounce scan failed: %s", exc)
+            return
+        changed = False
+        for recipient in active:
+            if recipient["email"].strip().lower() not in bounced:
+                continue
+            recipient.update(
+                status="bounced",
+                next_send_at="",
+                retry_at="",
+                attempt_step="",
+                attempt_rfc_message_id="",
+                last_error="Hard bounce detected in Lark delivery notice",
+                updated_at=iso(now),
+            )
+            self.store.event("hard_bounce_detected", recipient=recipient, at=now)
+            try:
+                self.remote.mark_lead_stopped_by_email(recipient["email"], "bounced")
+            except Exception as exc:
+                self.store.event(
+                    "remote_sync_failed",
+                    recipient=recipient,
+                    details=f"Hard bounce status: {exc}",
+                    at=now,
+                )
+            changed = True
+        if changed:
+            self.store.save_recipients(rows)
 
     def _check_online_assignment(
         self,
@@ -772,3 +858,82 @@ class CsvCampaignWorker:
         today = sent_at.astimezone(UTC).date()
         if self._sent_count_date == today:
             self._sent_count += 1
+
+    def _publish_report(
+        self,
+        rows: list[dict[str, str]],
+        now: datetime,
+        *,
+        status: str = "running",
+        force: bool = False,
+    ) -> None:
+        """Upsert a heartbeat and campaign tally without interrupting delivery."""
+
+        if (
+            not force
+            and self._last_report_at is not None
+            and now - self._last_report_at < REPORT_INTERVAL
+        ):
+            return
+        self._last_report_at = now
+        campaign = self._campaign or self.store.campaign()
+        campaign_id = (
+            self._campaign_id
+            or campaign.get("campaign_id")
+            or (rows[0].get("campaign_id") if rows else "")
+        )
+        if not campaign_id:
+            LOGGER.warning("Campaign dashboard report skipped: campaign ID unavailable")
+            return
+        activity = self.store.activity_summary(now)
+        day_start = now.astimezone(UTC).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        try:
+            deliveries_total, sent_today = self.remote.get_campaign_delivery_counts(
+                campaign_id, day_start
+            )
+        except Exception:
+            deliveries_total = activity["deliveries_total"]
+            sent_today = activity["sent_today"]
+        counts = {
+            label: sum(1 for row in rows if row["status"] == label)
+            for label in (
+                "pending",
+                "scheduled",
+                "completed",
+                "replied",
+                "bounced",
+                "skipped",
+                "unsubscribed",
+                "uncertain",
+            )
+        }
+        error_rows = [row for row in rows if row.get("last_error")]
+        latest_error = max(
+            error_rows,
+            key=lambda row: as_utc(row.get("updated_at")) or datetime.min.replace(tzinfo=UTC),
+            default={},
+        ).get("last_error")
+        try:
+            self.remote.upsert_worker_report(
+                campaign_id,
+                "lark_smtp",
+                now.astimezone(UTC).date().isoformat(),
+                {
+                    "worker_status": status,
+                    "sender_email": campaign.get("sender_email") or None,
+                    "sent_today": sent_today,
+                    "bounced_today": activity["bounced_today"],
+                    "replied_today": activity["replied_today"],
+                    "errors_today": activity["errors_today"],
+                    "deliveries_total": deliveries_total,
+                    "recipients_total": len(rows),
+                    **{f"{label}_total": value for label, value in counts.items()},
+                    "last_error": latest_error or None,
+                    "last_seen_at": iso(now),
+                    "updated_at": iso(now),
+                },
+            )
+        except Exception as exc:
+            LOGGER.warning("Campaign dashboard report failed: %s", exc)

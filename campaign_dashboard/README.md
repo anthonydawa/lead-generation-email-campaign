@@ -90,6 +90,11 @@ Run `campaign_dashboard/supabase_relay_templates_and_labels.sql` once. It adds
 reusable message templates, campaign-to-template tracking, and persistent lead
 batch labels. The local sender contract is unchanged.
 
+Run `campaign_dashboard/supabase_campaign_reporting.sql` once. It adds the
+service-role-only daily worker reports used by Campaign stats. Active Gmail and
+Lark workers refresh their health and campaign tally every 15 minutes without
+interrupting delivery.
+
 The server runtime requires:
 
 - `SUPABASE_URL`
