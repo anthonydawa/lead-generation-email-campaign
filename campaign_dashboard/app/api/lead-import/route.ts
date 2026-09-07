@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseRequest } from "../../lib/supabase-admin";
+import {
+  EMAIL_PATTERN,
+  isThirdPartyEmailVerified,
+} from "../../lib/lead-import-validation";
+import {
+  insertLeadsSkippingDuplicates,
+  type LeadInsertRecord,
+} from "../../lib/lead-insert";
 
 export const dynamic = "force-dynamic";
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export async function GET() {
   try {
@@ -31,7 +37,7 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const input = (await request.json()) as ImportInput;
-    const rows = (input.rows || []).slice(0, 500);
+    const rows = (input.rows || []).slice(0, 5000);
     if (!rows.length) {
       return NextResponse.json(
         { error: "Choose at least one spreadsheet row to import." },
@@ -39,37 +45,36 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const normalized = rows
-      .map((row, index) => normalizeRow(row, index + 1))
-      .filter(
-        (row) =>
-          row.company_name &&
-          row.company_website &&
-          row.contact_name &&
-          row.contact_name.trim().split(/\s+/).length > 1,
-      );
-    if (!normalized.length) {
-      return NextResponse.json(
-        {
-          error:
-            "No importable rows were found. Each row needs a company, website, and full contact name.",
-        },
-        { status: 400 },
-      );
-    }
-
+    const normalized = rows.map((row, index) => normalizeRow(row, index + 1));
+    const structurallyValid = normalized.filter(
+      (row) =>
+        row.company_name &&
+        row.company_website &&
+        row.contact_name &&
+        row.contact_name.trim().split(/\s+/).length > 1 &&
+        Boolean(row.business_email),
+    );
+    const verifiedCandidates = structurallyValid.filter((row) =>
+      isThirdPartyEmailVerified(
+        row.email_status,
+        row.third_party_email_verified,
+      ),
+    );
+    const rejectedInvalid = rows.length - structurallyValid.length;
+    const rejectedUnverified = structurallyValid.length - verifiedCandidates.length;
+    const batchLabel =
+      clean(input.batch_label, 120) ||
+      clean(input.source_file, 255) ||
+      "Uploaded spreadsheet";
     const batches = await supabaseRequest<Array<{ id: string }>>(
       "lead_import_batches",
       {
         method: "POST",
         body: JSON.stringify({
           source_file: clean(input.source_file, 255) || "uploaded-spreadsheet.csv",
-          label:
-            clean(input.batch_label, 120) ||
-            clean(input.source_file, 255) ||
-            "Uploaded spreadsheet",
+          label: batchLabel,
           total_rows: rows.length,
-          imported_rows: normalized.length,
+          imported_rows: 0,
         }),
         prefer: "return=representation",
       },
@@ -77,46 +82,62 @@ export async function POST(request: NextRequest) {
     const batchId = batches[0]?.id;
     if (!batchId) throw new Error("Unable to create the import batch.");
 
-    const saved = await supabaseRequest<ImportedProspect[]>(
-      "imported_prospects?on_conflict=company_website,contact_name",
+    const contactImport = await promoteEmailContacts(
+      verifiedCandidates,
+      batchLabel,
+    );
+    const insertedEmails = new Set(
+      contactImport.inserted.map((contact) => contact.email.toLowerCase()),
+    );
+    const acceptedEmails = new Set<string>();
+    const acceptedRows = verifiedCandidates.filter((row) => {
+      const email = String(row.business_email || "").toLowerCase();
+      if (!insertedEmails.has(email) || acceptedEmails.has(email)) return false;
+      acceptedEmails.add(email);
+      return true;
+    });
+    await supabaseRequest(
+      `lead_import_batches?id=eq.${encodeURIComponent(batchId)}`,
       {
-        method: "POST",
-        body: JSON.stringify(
-          normalized.map((row) => ({
-            ...row,
-            import_batch_id: batchId,
-            source_file:
-              clean(input.source_file, 255) || "uploaded-spreadsheet.csv",
-            batch_label:
-              clean(input.batch_label, 120) ||
-              clean(input.source_file, 255) ||
-              "Uploaded spreadsheet",
-            updated_at: new Date().toISOString(),
-          })),
-        ),
-        prefer: "resolution=merge-duplicates,return=representation",
+        method: "PATCH",
+        body: JSON.stringify({ imported_rows: acceptedRows.length }),
+        prefer: "return=minimal",
       },
     );
 
-    const contactImport = await promoteEmailContacts(
-      normalized,
-      clean(input.batch_label, 120) ||
-        clean(input.source_file, 255) ||
-        "Uploaded spreadsheet",
-    );
-    const queuedForFindEmail = normalized.filter(
-      (row) => row.find_email_status === "needs_find_email",
-    ).length;
+    const saved = acceptedRows.length
+      ? await supabaseRequest<ImportedProspect[]>(
+          "imported_prospects?on_conflict=company_website,contact_name",
+          {
+            method: "POST",
+            body: JSON.stringify(
+              acceptedRows.map((row) => ({
+                ...stripImportOnlyFields(row),
+                import_batch_id: batchId,
+                source_file:
+                  clean(input.source_file, 255) || "uploaded-spreadsheet.csv",
+                batch_label: batchLabel,
+                updated_at: new Date().toISOString(),
+              })),
+            ),
+            prefer: "resolution=merge-duplicates,return=representation",
+          },
+        )
+      : [];
+    const skippedDuplicates = verifiedCandidates.length - acceptedRows.length;
 
     return NextResponse.json({
       batch_id: batchId,
       imported: saved.length,
-      skipped: rows.length - normalized.length,
+      skipped: rows.length - acceptedRows.length,
+      skipped_duplicates: skippedDuplicates,
+      rejected_unverified: rejectedUnverified,
+      rejected_invalid: rejectedInvalid,
       prospects: saved,
-      email_contacts: contactImport.total,
-      verified_contacts: contactImport.verified,
-      queued_for_validation: queuedForFindEmail,
-      queued_for_find_email: queuedForFindEmail,
+      email_contacts: acceptedRows.length,
+      verified_contacts: acceptedRows.length,
+      queued_for_validation: 0,
+      queued_for_find_email: 0,
     });
   } catch (error) {
     const message =
@@ -140,63 +161,19 @@ async function promoteEmailContacts(
   rows: ReturnType<typeof normalizeRow>[],
   batchLabel: string,
 ) {
-  const contacts = rows
-    .filter(
-      (row) =>
-        Boolean(row.business_email) &&
-        isSpreadsheetVerified(row.email_status),
-    )
-    .map((row) => {
-      const name = splitName(row.contact_name);
-      return {
-        email: row.business_email,
-        first_name: name.first || null,
-        last_name: name.last || null,
-        company: row.company_name || null,
-        validation_status: importedValidationStatus(row.email_status),
-        status: "pending",
-        batch_label: batchLabel,
-      };
-    });
-  const verified = contacts.filter(
-    (contact) => contact.validation_status === "valid",
-  );
-
-  // Insert new contacts without changing the outreach state of existing ones.
-  // A trusted verified status may upgrade validation only; it must never reset
-  // an already sent, replied, bounced, or unsubscribed lead to pending.
-  if (verified.length) {
-    await supabaseRequest("leads", {
-      method: "POST",
-      body: JSON.stringify(verified),
-      prefer: "resolution=ignore-duplicates,return=minimal",
-    });
-    const emails = verified
-      .map((contact) => encodeURIComponent(String(contact.email)))
-      .join(",");
-    await supabaseRequest(`leads?email=in.(${emails})`, {
-      method: "PATCH",
-      body: JSON.stringify({ validation_status: "valid" }),
-      prefer: "return=minimal",
-    });
-  }
-  return {
-    total: contacts.length,
-    verified: verified.length,
-  };
-}
-
-function importedValidationStatus(value?: string | null) {
-  const status = clean(value, 80)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-  if (status === "verified") return "valid";
-  if (["invalid", "undeliverable", "bounced"].includes(status)) {
-    return "invalid";
-  }
-  if (status === "disposable") return "disposable";
-  return "unvalidated";
+  const contacts: LeadInsertRecord[] = rows.map((row) => {
+    const name = splitName(row.contact_name);
+    return {
+      email: String(row.business_email),
+      first_name: name.first || null,
+      last_name: name.last || null,
+      company: row.company_name || null,
+      validation_status: "valid" as const,
+      status: "pending",
+      batch_label: batchLabel,
+    };
+  });
+  return { inserted: await insertLeadsSkippingDuplicates(contacts) };
 }
 
 function splitName(value: string) {
@@ -220,7 +197,7 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ error: "Imported lead ID is required." }, { status: 400 });
     }
     const email = clean(input.business_email, 320).toLowerCase();
-    if (email && !EMAIL_RE.test(email)) {
+    if (email && !EMAIL_PATTERN.test(email)) {
       return NextResponse.json({ error: "The email address is invalid." }, { status: 400 });
     }
     await supabaseRequest(
@@ -260,9 +237,13 @@ export async function PATCH(request: NextRequest) {
 function normalizeRow(row: ImportRow, sourceRow: number) {
   const website = normalizeWebsite(row.company_website || "");
   const email = clean(row.business_email, 320).toLowerCase();
-  const validEmail = EMAIL_RE.test(email) ? email : null;
+  const validEmail = EMAIL_PATTERN.test(email) ? email : null;
   const spreadsheetVerified =
-    Boolean(validEmail) && isSpreadsheetVerified(row.email_status);
+    Boolean(validEmail) &&
+    isThirdPartyEmailVerified(
+      row.email_status,
+      row.third_party_email_verified,
+    );
   return {
     company_name: clean(row.company_name, 200),
     company_website: website,
@@ -275,6 +256,8 @@ function normalizeRow(row: ImportRow, sourceRow: number) {
     contact_linkedin: normalizeOptionalUrl(row.contact_linkedin),
     business_email: validEmail,
     email_status: clean(row.email_status, 80) || (email ? "Unvalidated" : "Missing"),
+    third_party_email_verified:
+      clean(row.third_party_email_verified, 120) || null,
     why_this_lead_fits: clean(row.why_this_lead_fits, 1500) || null,
     lead_tier: clean(row.lead_tier, 80) || null,
     outreach_status: clean(row.outreach_status, 80) || "Research",
@@ -286,10 +269,6 @@ function normalizeRow(row: ImportRow, sourceRow: number) {
     source_row: Number(row.source_row || sourceRow),
     find_email_status: spreadsheetVerified ? "approved" : "needs_find_email",
   };
-}
-
-function isSpreadsheetVerified(value?: string | null) {
-  return clean(value, 80).toLowerCase() === "verified";
 }
 
 function normalizeWebsite(value: string) {
@@ -353,6 +332,7 @@ type ImportRow = {
   notes?: string;
   assigned_to?: string;
   source_row?: number;
+  third_party_email_verified?: string;
 };
 
 type ImportedProspect = ImportRow & {
@@ -361,3 +341,9 @@ type ImportedProspect = ImportRow & {
   updated_at: string;
   find_email_status: string;
 };
+
+function stripImportOnlyFields(row: ReturnType<typeof normalizeRow>) {
+  return Object.fromEntries(
+    Object.entries(row).filter(([key]) => key !== "third_party_email_verified"),
+  );
+}

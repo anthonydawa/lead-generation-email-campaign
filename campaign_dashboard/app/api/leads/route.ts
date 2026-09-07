@@ -1,7 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { supabaseRequest } from "../../lib/supabase-admin";
-
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+import {
+  EMAIL_PATTERN,
+  isThirdPartyEmailVerified,
+} from "../../lib/lead-import-validation";
+import {
+  insertLeadsSkippingDuplicates,
+  type LeadInsertRecord,
+} from "../../lib/lead-insert";
 
 export async function POST(request: NextRequest) {
   try {
@@ -11,9 +16,9 @@ export async function POST(request: NextRequest) {
     };
     const input = payload.leads ?? [];
     const batchLabel = clean(payload.batch_label);
-    if (!input.length || input.length > 1000) {
+    if (!input.length || input.length > 5000) {
       return NextResponse.json(
-        { error: "Provide between 1 and 1,000 leads." },
+        { error: "Provide between 1 and 5,000 leads." },
         { status: 400 },
       );
     }
@@ -26,22 +31,26 @@ export async function POST(request: NextRequest) {
       validation_status: importedValidationStatus(
         lead?.validation_status || lead?.email_status,
       ),
+      third_party_email_verified: clean(lead?.third_party_email_verified),
       status: "pending" as const,
       batch_label: batchLabel,
       source_row: index + 2,
     }));
 
-    const invalid = normalized.find((lead) => !EMAIL_PATTERN.test(lead.email));
-    if (invalid) {
-      return NextResponse.json(
-        {
-          error: `CSV row ${invalid.source_row} has an invalid or missing email address: ${invalid.email || "(blank)"}`,
-        },
-        { status: 400 },
-      );
-    }
+    const verified = normalized.filter(
+      (lead) =>
+        EMAIL_PATTERN.test(lead.email) &&
+        isThirdPartyEmailVerified(
+          lead.validation_status,
+          lead.third_party_email_verified,
+        ),
+    );
+    const rejectedInvalid = normalized.filter(
+      (lead) => !EMAIL_PATTERN.test(lead.email),
+    ).length;
+    const rejectedUnverified = normalized.length - verified.length - rejectedInvalid;
 
-    const records: LeadRecord[] = normalized.map((lead) => ({
+    const records: LeadInsertRecord[] = verified.map((lead) => ({
       email: lead.email,
       first_name: lead.first_name,
       last_name: lead.last_name,
@@ -50,22 +59,14 @@ export async function POST(request: NextRequest) {
       status: lead.status,
       batch_label: lead.batch_label,
     }));
-    const inserted = await insertLeadsSkippingDuplicates(records);
-
-    const verifiedEmails = normalized
-      .filter((lead) => lead.validation_status === "valid")
-      .map((lead) => encodeURIComponent(lead.email));
-    if (verifiedEmails.length) {
-      await supabaseRequest(`leads?email=in.(${verifiedEmails.join(",")})`, {
-        method: "PATCH",
-        body: JSON.stringify({ validation_status: "valid" }),
-        prefer: "return=minimal",
-      });
-    }
+    const inserted = (await insertLeadsSkippingDuplicates(records)).length;
 
     return NextResponse.json({
       inserted,
       skipped: normalized.length - inserted,
+      skipped_duplicates: verified.length - inserted,
+      rejected_unverified: rejectedUnverified,
+      rejected_invalid: rejectedInvalid,
     });
   } catch (error) {
     return NextResponse.json(
@@ -73,40 +74,6 @@ export async function POST(request: NextRequest) {
       { status: 500 },
     );
   }
-}
-
-async function insertLeadsSkippingDuplicates(
-  records: LeadRecord[],
-): Promise<number> {
-  if (!records.length) return 0;
-  try {
-    const inserted = await supabaseRequest<unknown[]>("leads", {
-      method: "POST",
-      body: JSON.stringify(records),
-      prefer: "return=representation",
-    });
-    return inserted.length;
-  } catch (error) {
-    if (!isDuplicateEmailError(error)) throw error;
-    if (records.length === 1) return 0;
-
-    const midpoint = Math.ceil(records.length / 2);
-    const firstHalf = await insertLeadsSkippingDuplicates(
-      records.slice(0, midpoint),
-    );
-    const secondHalf = await insertLeadsSkippingDuplicates(
-      records.slice(midpoint),
-    );
-    return firstHalf + secondHalf;
-  }
-}
-
-function isDuplicateEmailError(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error || "");
-  return (
-    message.includes("leads_email_lower_unique") ||
-    (message.includes("23505") && message.includes("lower(email)"))
-  );
 }
 
 function clean(value?: string | null) {
@@ -121,16 +88,7 @@ type IncomingLead = {
   company?: string | null;
   validation_status?: string | null;
   email_status?: string | null;
-};
-
-type LeadRecord = {
-  email: string;
-  first_name: string | null;
-  last_name: string | null;
-  company: string | null;
-  validation_status: string;
-  status: "pending";
-  batch_label: string | null;
+  third_party_email_verified?: string | null;
 };
 
 function importedValidationStatus(value?: string | null) {
@@ -138,7 +96,7 @@ function importedValidationStatus(value?: string | null) {
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ");
-  if (status === "verified") return "valid";
+  if (isThirdPartyEmailVerified(status)) return "valid";
   if (["invalid", "undeliverable", "bounced"].includes(status)) return "invalid";
   if (status === "disposable") return "disposable";
   return "unvalidated";

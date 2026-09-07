@@ -15,6 +15,10 @@ import {
   personalizeEmailHtml,
   stripManagedEmailFooter,
 } from "../lib/email-content";
+import {
+  EMAIL_PATTERN,
+  isThirdPartyEmailVerified,
+} from "../lib/lead-import-validation";
 
 type Tab = "overview" | "finder" | "library" | "stats" | "campaigns";
 type Lead = {
@@ -260,6 +264,8 @@ type ImportPreviewRow = Omit<
   | "updated_at"
 > & {
   selected: boolean;
+  third_party_email_verified?: string | null;
+  import_rejection_reason?: string | null;
 };
 const initialData: DashboardData = {
   leads: [],
@@ -475,7 +481,7 @@ export function CampaignDashboard() {
       if (!response.ok) throw new Error(payload.error ?? "Lead import failed");
       setLeadDraft("");
       setNotice(
-        `${payload.inserted} email-ready lead${payload.inserted === 1 ? "" : "s"} imported.`,
+        `${payload.inserted} verified new lead${payload.inserted === 1 ? "" : "s"} imported. ${payload.skipped_duplicates || 0} duplicate${payload.skipped_duplicates === 1 ? "" : "s"} and ${(payload.rejected_unverified || 0) + (payload.rejected_invalid || 0)} unverified or invalid row${(payload.rejected_unverified || 0) + (payload.rejected_invalid || 0) === 1 ? "" : "s"} rejected.`,
       );
       await loadData();
     } catch (importError) {
@@ -499,7 +505,7 @@ export function CampaignDashboard() {
         const contacts = parseLeads(contents);
         setLeadDraft(contents);
         setNotice(
-          `${contacts.length} contact${contacts.length === 1 ? "" : "s"} loaded from ${file.name}. Review the batch label, then click Import contacts.`,
+          `${contacts.length} verified unique contact${contacts.length === 1 ? "" : "s"} loaded from ${file.name}. Unverified and repeated emails were rejected before import.`,
         );
       } catch (parseError) {
         setLeadDraft("");
@@ -1764,8 +1770,10 @@ function ResearchLeadImporter({
         setFileName(file.name);
         setBatchLabel(file.name);
         setPreview(rows);
+        const ready = rows.filter((row) => row.selected).length;
+        const rejected = rows.length - ready;
         setNotice(
-          `${rows.length} spreadsheet lead${rows.length === 1 ? "" : "s"} ready to review.`,
+          `${ready} third-party verified lead${ready === 1 ? "" : "s"} ready. ${rejected} unverified, invalid, or repeated row${rejected === 1 ? "" : "s"} rejected.`,
         );
       } catch (fileError) {
         setPreview([]);
@@ -1799,7 +1807,14 @@ function ResearchLeadImporter({
         body: JSON.stringify({
           source_file: fileName,
           batch_label: batchLabel.trim(),
-          rows: selected.map(({ selected: _selected, ...row }) => row),
+          rows: preview
+            .filter((row) => row.selected || row.import_rejection_reason)
+            .map((row) => {
+              const requestRow: Partial<ImportPreviewRow> = { ...row };
+              delete requestRow.selected;
+              delete requestRow.import_rejection_reason;
+              return requestRow;
+            }),
         }),
       });
       const payload = await response.json();
@@ -1808,7 +1823,7 @@ function ResearchLeadImporter({
       setPreview([]);
       setFileName("");
       setNotice(
-        `${payload.imported} lead${payload.imported === 1 ? "" : "s"} saved. ${payload.verified_contacts || 0} spreadsheet-verified contact${payload.verified_contacts === 1 ? "" : "s"} added to the campaign list; ${payload.queued_for_find_email || 0} sent to Find Email.`,
+        `${payload.imported} verified new lead${payload.imported === 1 ? "" : "s"} added to the campaign list. ${payload.skipped_duplicates || 0} duplicate${payload.skipped_duplicates === 1 ? "" : "s"} skipped; ${(payload.rejected_unverified || 0) + (payload.rejected_invalid || 0)} unverified or invalid row${(payload.rejected_unverified || 0) + (payload.rejected_invalid || 0) === 1 ? "" : "s"} rejected.`,
       );
       await onImported();
     } catch (importError) {
@@ -1823,15 +1838,20 @@ function ResearchLeadImporter({
   }
 
   const selectedCount = preview.filter((row) => row.selected).length;
+  const rejectedCount = preview.length - selectedCount;
+  const previewRows = [
+    ...preview.filter((row) => !row.import_rejection_reason),
+    ...preview.filter((row) => row.import_rejection_reason),
+  ];
   return (
     <section className="panel research-import-panel">
       <div className="research-import-copy">
         <span className="eyebrow">Research spreadsheet</span>
         <h2>Upload your Lead Tracker</h2>
         <p>
-          In Google Sheets, open the Lead Tracker tab and choose File → Download
-          → Comma-separated values. Relay recognizes your existing column names,
-          keeps leads without emails, and creates a find-email queue.
+          Download your master Google Sheet as CSV or TSV. Relay imports only
+          rows marked third-party email verified and rejects unverified, invalid,
+          or duplicate email addresses.
         </p>
         <div className="import-actions">
           <label className="file-button">
@@ -1850,7 +1870,7 @@ function ResearchLeadImporter({
             >
               {importing
                 ? "Saving…"
-                : `Save ${selectedCount} lead${selectedCount === 1 ? "" : "s"}`}
+                : `Import ${selectedCount} verified lead${selectedCount === 1 ? "" : "s"}`}
             </button>
           )}
         </div>
@@ -1877,13 +1897,18 @@ function ResearchLeadImporter({
             <div className="preview-heading">
               <span>
                 <strong>{fileName}</strong>
-                <small>{selectedCount} selected</small>
+                <small>
+                  {selectedCount} verified ready · {rejectedCount} rejected
+                </small>
               </span>
               <button
                 className="text-button"
                 onClick={() =>
                   setPreview((rows) =>
-                    rows.map((row) => ({ ...row, selected: true })),
+                    rows.map((row) => ({
+                      ...row,
+                      selected: !row.import_rejection_reason,
+                    })),
                   )
                 }
               >
@@ -1891,18 +1916,19 @@ function ResearchLeadImporter({
               </button>
             </div>
             <div className="preview-rows">
-              {preview.slice(0, 12).map((row, index) => (
+              {previewRows.slice(0, 12).map((row) => (
                 <label
                   className={row.selected ? "preview-row selected" : "preview-row"}
-                  key={`${row.company_website}-${row.contact_name}-${index}`}
+                  key={`${row.source_row}-${row.business_email || row.contact_name}`}
                 >
                   <input
                     type="checkbox"
                     checked={row.selected}
+                    disabled={Boolean(row.import_rejection_reason)}
                     onChange={() =>
                       setPreview((rows) =>
-                        rows.map((item, rowIndex) =>
-                          rowIndex === index
+                        rows.map((item) =>
+                          item.source_row === row.source_row
                             ? { ...item, selected: !item.selected }
                             : item,
                         ),
@@ -1915,7 +1941,11 @@ function ResearchLeadImporter({
                   </span>
                   <span>
                     <strong>{row.company_name}</strong>
-                    <small>{row.business_email || "Email missing"}</small>
+                    <small>
+                      {row.import_rejection_reason ||
+                        row.business_email ||
+                        "Email missing"}
+                    </small>
                   </span>
                 </label>
               ))}
@@ -2540,8 +2570,9 @@ function LeadLibrary({
           <h2>Add validated contact data</h2>
           <p>
             Paste one person per line as email, first name, last name, company,
-            verification status—or load a CSV. Verified contacts are immediately
-            eligible; blank or unverified statuses enter the validation queue.
+            verification status—or load a CSV. Only third-party verified email
+            rows are accepted. Unverified, invalid, and duplicate emails are
+            rejected automatically.
           </p>
           <form onSubmit={onImport}>
             <label className="batch-label-field">
@@ -3996,7 +4027,7 @@ function parseResearchSpreadsheet(value: string): ImportPreviewRow[] {
       const companyName =
         get(row, ["company name", "company"]) || emailDomain;
       return {
-        selected: Boolean(companyName && companyWebsite && contactName),
+        selected: false,
         company_name: companyName,
         company_website: companyWebsite,
         company_linkedin:
@@ -4012,7 +4043,18 @@ function parseResearchSpreadsheet(value: string): ImportPreviewRow[] {
           get(row, ["contact linkedin", "linkedin", "profile url"]) || null,
         business_email: businessEmail || null,
         email_status:
-          get(row, ["email status", "validation status"]) || "Missing",
+          get(row, [
+            "email verification",
+            "email verification status",
+            "email status",
+            "validation status",
+          ]) || "Missing",
+        third_party_email_verified:
+          get(row, [
+            "third party email verified",
+            "third party verified",
+            "email third party verified",
+          ]) || null,
         why_this_lead_fits:
           get(row, ["why this lead fits", "why lead fits", "fit"]) || null,
         lead_tier:
@@ -4032,7 +4074,40 @@ function parseResearchSpreadsheet(value: string): ImportPreviewRow[] {
     .filter(
       (row) =>
         row.company_name || row.company_website || row.contact_name,
-    );
+    )
+    .map((row, index, rows) => {
+      const email = String(row.business_email || "").trim().toLowerCase();
+      let rejectionReason = "";
+      if (!EMAIL_PATTERN.test(email)) {
+        rejectionReason = "Missing or invalid business email";
+      } else if (
+        !isThirdPartyEmailVerified(
+          row.email_status,
+          row.third_party_email_verified,
+        )
+      ) {
+        rejectionReason = "Not third-party email verified";
+      } else if (
+        !row.company_name ||
+        !row.company_website ||
+        row.contact_name.trim().split(/\s+/).length < 2
+      ) {
+        rejectionReason = "Missing company, website, or full contact name";
+      } else if (
+        rows.findIndex(
+          (candidate) =>
+            String(candidate.business_email || "").trim().toLowerCase() === email,
+        ) !== index
+      ) {
+        rejectionReason = "Duplicate email in this file";
+      }
+      return {
+        ...row,
+        business_email: email || null,
+        selected: !rejectionReason,
+        import_rejection_reason: rejectionReason || null,
+      };
+    });
 }
 
 function detectDelimiter(value: string) {
@@ -4152,15 +4227,36 @@ function parseLeads(value: string) {
               "organisation",
             ]) || domainFromEmail(email),
           validation_status: get(row, [
+            "email verification",
             "verification status",
             "validation status",
             "email status",
             "email verification status",
             "verified",
           ]),
+          third_party_email_verified: get(row, [
+            "third party email verified",
+            "third party verified",
+            "email third party verified",
+          ]),
         };
       })
-      .filter((lead) => Boolean(lead.email));
+      .filter(
+        (lead) =>
+          EMAIL_PATTERN.test(lead.email.trim().toLowerCase()) &&
+          isThirdPartyEmailVerified(
+            lead.validation_status,
+            lead.third_party_email_verified,
+          ),
+      )
+      .filter(
+        (lead, index, leads) =>
+          leads.findIndex(
+            (candidate) =>
+              candidate.email.trim().toLowerCase() ===
+              lead.email.trim().toLowerCase(),
+          ) === index,
+      );
   }
   const headerLooksLikeData = grid[0].some((cell) => cell.includes("@"));
   if (!headerLooksLikeData) {
@@ -4177,7 +4273,19 @@ function parseLeads(value: string) {
       );
       return { email, first_name, last_name, company, validation_status };
     })
-    .filter((lead) => Boolean(lead.email));
+    .filter(
+      (lead) =>
+        EMAIL_PATTERN.test(lead.email.trim().toLowerCase()) &&
+        isThirdPartyEmailVerified(lead.validation_status),
+    )
+    .filter(
+      (lead, index, leads) =>
+        leads.findIndex(
+          (candidate) =>
+            candidate.email.trim().toLowerCase() ===
+            lead.email.trim().toLowerCase(),
+        ) === index,
+    );
 }
 
 function splitImportedName(value: string) {
