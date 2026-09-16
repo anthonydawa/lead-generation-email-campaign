@@ -168,11 +168,17 @@ class CsvWorkerTests(unittest.TestCase):
         gmail.find_hard_bounce_recipients_since.return_value = set()
         now = datetime(2026, 8, 5, 12, tzinfo=UTC)
 
-        matched = self.worker(gmail).poll_replies(now)
+        remote = Mock()
+        matched = CsvCampaignWorker(
+            settings(), remote, gmail, self.store
+        ).poll_replies(now)
 
         self.assertEqual(matched, 1)
         self.assertEqual(self.store.recipients()[0]["status"], "replied")
         self.assertEqual(self.store.last_reply_scan_at(), now)
+        remote.mark_campaign_recipient_replied.assert_called_once_with(
+            "campaign-1", "lead-1"
+        )
         gmail.thread_has_reply.assert_not_called()
 
     def test_hard_bounce_stops_the_recipient_and_syncs_remote(self) -> None:

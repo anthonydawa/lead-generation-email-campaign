@@ -468,6 +468,17 @@ class CsvCampaignWorker:
                     updated_at=iso(now),
                 )
                 self.store.event("reply_detected", recipient=recipient, at=now)
+                try:
+                    self.remote.mark_campaign_recipient_replied(
+                        recipient["campaign_id"], recipient["lead_id"]
+                    )
+                except Exception as exc:
+                    self.store.event(
+                        "remote_sync_failed",
+                        recipient=recipient,
+                        details=f"Campaign reply status: {exc}",
+                        at=now,
+                    )
                 replied += 1
                 changed = True
         if changed:

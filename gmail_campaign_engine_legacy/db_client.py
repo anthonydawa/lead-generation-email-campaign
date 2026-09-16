@@ -463,6 +463,30 @@ class DatabaseClient:
         )
         return True
 
+    def mark_campaign_recipient_skipped(self, campaign_id: str, lead_id: str) -> None:
+        """Stop one campaign assignment without globally suppressing the lead."""
+
+        (
+            self.client.table("campaign_leads")
+            .update({"status": "skipped", "next_send_at": None})
+            .eq("campaign_id", campaign_id)
+            .eq("lead_id", lead_id)
+            .in_("status", ["pending", "sent"])
+            .execute()
+        )
+
+    def mark_campaign_recipient_replied(self, campaign_id: str, lead_id: str) -> None:
+        """Stop follow-ups only for this campaign; do not suppress the lead."""
+
+        (
+            self.client.table("campaign_leads")
+            .update({"status": "replied", "next_send_at": None})
+            .eq("campaign_id", campaign_id)
+            .eq("lead_id", lead_id)
+            .in_("status", ["pending", "sent"])
+            .execute()
+        )
+
     def upsert_worker_report(
         self,
         campaign_id: str,
