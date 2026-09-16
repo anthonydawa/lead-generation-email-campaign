@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseRequest } from "../../lib/supabase-admin";
-import { ensureDefaultEmailFooter } from "../../lib/email-content";
+import {
+  ensureDefaultEmailFooter,
+  normalizeTemplateVariables,
+} from "../../lib/email-content";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -59,10 +62,15 @@ export async function POST(request: NextRequest) {
   try {
     const payload = (await request.json()) as CampaignInput;
     const title = payload.title?.trim();
-    const subject = payload.subject_template?.trim();
+    const subjectDraft = payload.subject_template?.trim();
+    const subject = subjectDraft ? normalizeTemplateVariables(subjectDraft) : "";
     const bodyDraft = payload.body_template?.trim();
-    const body = bodyDraft ? ensureDefaultEmailFooter(bodyDraft) : "";
-    const leadIds = [...new Set(payload.lead_ids ?? [])];
+    const body = bodyDraft
+      ? ensureDefaultEmailFooter(normalizeTemplateVariables(bodyDraft))
+      : "";
+    const requestedLeadIds = [...new Set(payload.lead_ids ?? [])].filter((id) =>
+      UUID_PATTERN.test(id),
+    );
     const initialSendAt = payload.initial_send_at?.trim();
     const timezone = payload.timezone?.trim() || "UTC";
     const senderEmail = payload.sender_email?.trim().toLowerCase() || null;
@@ -71,7 +79,7 @@ export async function POST(request: NextRequest) {
       .map((step) => ({
         delay_days: Number(step.delay_days),
         body_template: step.body_template?.trim()
-          ? ensureDefaultEmailFooter(step.body_template)
+          ? ensureDefaultEmailFooter(normalizeTemplateVariables(step.body_template))
           : "",
       }))
       .sort((a, b) => a.delay_days - b.delay_days);
@@ -82,7 +90,7 @@ export async function POST(request: NextRequest) {
         { status: 400 },
       );
     }
-    if (!leadIds.length) {
+    if (!requestedLeadIds.length) {
       return NextResponse.json(
         { error: "Select at least one recipient." },
         { status: 400 },
@@ -109,6 +117,20 @@ export async function POST(request: NextRequest) {
         {
           error:
             "Each follow-up needs a message and a unique delay from 1 to 365 days.",
+        },
+        { status: 400 },
+      );
+    }
+
+    const leadIds = await eligibleCampaignLeadIds(
+      requestedLeadIds,
+      messageTemplateId,
+    );
+    if (!leadIds.length) {
+      return NextResponse.json(
+        {
+          error:
+            "Every selected recipient is invalid, suppressed, or has already received this template.",
         },
         { status: 400 },
       );
@@ -158,7 +180,14 @@ export async function POST(request: NextRequest) {
       prefer: "return=minimal",
     });
 
-    return NextResponse.json({ id: campaignId }, { status: 201 });
+    return NextResponse.json(
+      {
+        id: campaignId,
+        recipients: leadIds.length,
+        excluded: requestedLeadIds.length - leadIds.length,
+      },
+      { status: 201 },
+    );
   } catch (error) {
     if (campaignId) {
       try {
@@ -196,3 +225,53 @@ type CampaignInput = {
   }>;
   lead_ids?: string[];
 };
+
+async function eligibleCampaignLeadIds(
+  requestedLeadIds: string[],
+  messageTemplateId: string | null,
+) {
+  const valid = new Set<string>();
+  const suppressed = new Set<string>();
+
+  for (const ids of chunks(requestedLeadIds, 100)) {
+    const filter = ids.map(encodeURIComponent).join(",");
+    const [leadRows, stoppedRows] = await Promise.all([
+      supabaseRequest<Array<{ id: string }>>(
+        `leads?select=id&id=in.(${filter})&status=eq.pending&validation_status=eq.valid`,
+      ),
+      supabaseRequest<Array<{ lead_id: string }>>(
+        `campaign_leads?select=lead_id&lead_id=in.(${filter})&status=in.(skipped,replied,bounced,unsubscribed)`,
+      ),
+    ]);
+    leadRows.forEach((row) => valid.add(row.id));
+    stoppedRows.forEach((row) => suppressed.add(row.lead_id));
+  }
+
+  if (messageTemplateId) {
+    const priorCampaigns = await supabaseRequest<Array<{ id: string }>>(
+      `campaigns?select=id&message_template_id=eq.${encodeURIComponent(messageTemplateId)}`,
+    );
+    const campaignIds = priorCampaigns.map((row) => row.id);
+    for (const ids of chunks(campaignIds, 100)) {
+      if (!ids.length) continue;
+      const campaignFilter = ids.map(encodeURIComponent).join(",");
+      for (const leadIds of chunks(requestedLeadIds, 100)) {
+        const leadFilter = leadIds.map(encodeURIComponent).join(",");
+        const sentRows = await supabaseRequest<Array<{ lead_id: string }>>(
+          `campaign_logs?select=lead_id&status=eq.sent&campaign_id=in.(${campaignFilter})&lead_id=in.(${leadFilter})`,
+        );
+        sentRows.forEach((row) => suppressed.add(row.lead_id));
+      }
+    }
+  }
+
+  return requestedLeadIds.filter((id) => valid.has(id) && !suppressed.has(id));
+}
+
+function chunks<T>(values: T[], size: number) {
+  const result: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    result.push(values.slice(index, index + size));
+  }
+  return result;
+}

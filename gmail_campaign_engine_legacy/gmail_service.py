@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import Resource, build
@@ -62,8 +63,11 @@ class GmailService:
             )
 
         if credentials and credentials.expired and credentials.refresh_token:
-            credentials.refresh(Request())
-        elif not credentials or not credentials.valid:
+            try:
+                credentials.refresh(Request())
+            except RefreshError:
+                credentials = None
+        if not credentials or not credentials.valid:
             credentials_file = self.settings.gmail_credentials_file
             if not credentials_file.exists():
                 raise FileNotFoundError(

@@ -31,6 +31,11 @@ def settings() -> Settings:
         MIN_DELAY_SECONDS=0,
         MAX_DELAY_SECONDS=0,
         DAILY_SEND_LIMIT=10,
+        DAILY_NEW_RECIPIENT_LIMIT=10,
+        FIRST_DAY_NEW_RECIPIENT_LIMIT=10,
+        SEND_WINDOW_START_HOUR_UTC=0,
+        SEND_WINDOW_END_HOUR_UTC=24,
+        SEND_WEEKDAYS_ONLY=False,
     )
 
 

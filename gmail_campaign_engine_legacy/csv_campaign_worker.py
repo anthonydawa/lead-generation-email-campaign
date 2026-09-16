@@ -291,6 +291,17 @@ class CsvCampaignStore:
             and as_utc(row.get("timestamp")).date() == today  # type: ignore[union-attr]
         )
 
+    def initial_send_dates(self) -> list[Any]:
+        if not self.events_path.exists():
+            return []
+        return [
+            sent_at.date()
+            for row in _read_rows(self.events_path)
+            if row.get("event") in {"sent", "recovered_sent"}
+            and str(row.get("step")) == "0"
+            and (sent_at := as_utc(row.get("timestamp"))) is not None
+        ]
+
     def activity_summary(self, now: datetime) -> dict[str, int]:
         """Summarize local delivery events for the daily worker report."""
 
@@ -480,6 +491,10 @@ class CsvCampaignWorker:
         if all(row["status"] in TERMINAL_STATUSES for row in rows):
             return CycleResult(completed=True)
 
+        next_window = self._next_send_window(now)
+        if next_window is not None:
+            return CycleResult(next_due_at=next_window)
+
         if self._sent_today(now) >= self.settings.daily_send_limit:
             tomorrow = (now + timedelta(days=1)).replace(
                 hour=0, minute=0, second=0, microsecond=0
@@ -490,7 +505,18 @@ class CsvCampaignWorker:
         if not due:
             return CycleResult(next_due_at=self._next_due(rows))
 
-        recipient = min(due, key=lambda row: as_utc(row["next_send_at"]) or now)
+        followups = [row for row in due if row["status"] == "scheduled"]
+        initials = [row for row in due if row["status"] == "pending"]
+        if followups:
+            recipient = min(
+                followups, key=lambda row: as_utc(row["next_send_at"]) or now
+            )
+        else:
+            if self._initials_sent_today(now) >= self._initial_limit(now):
+                return CycleResult(next_due_at=self._next_active_day(now))
+            recipient = min(
+                initials, key=lambda row: as_utc(row["next_send_at"]) or now
+            )
         if recipient["status"] == "scheduled" and recipient["gmail_thread_id"]:
             try:
                 if self.gmail.thread_has_reply(
@@ -837,6 +863,44 @@ class CsvCampaignWorker:
         today = sent_at.astimezone(UTC).date()
         if self._sent_count_date == today:
             self._sent_count += 1
+
+    def _initials_sent_today(self, now: datetime) -> int:
+        today = now.astimezone(UTC).date()
+        return sum(sent_date == today for sent_date in self.store.initial_send_dates())
+
+    def _initial_limit(self, now: datetime) -> int:
+        sent_dates = self.store.initial_send_dates()
+        today = now.astimezone(UTC).date()
+        if not sent_dates or min(sent_dates) == today:
+            return self.settings.first_day_new_recipient_limit
+        return self.settings.daily_new_recipient_limit
+
+    def _next_send_window(self, now: datetime) -> datetime | None:
+        current = now.astimezone(UTC)
+        start = self.settings.send_window_start_hour_utc
+        end = self.settings.send_window_end_hour_utc
+        if (
+            (not self.settings.send_weekdays_only or current.weekday() < 5)
+            and start <= current.hour < end
+        ):
+            return None
+        return self._next_active_day(current, include_today=current.hour < start)
+
+    def _next_active_day(
+        self, now: datetime, *, include_today: bool = False
+    ) -> datetime:
+        current = now.astimezone(UTC)
+        candidate = current.replace(
+            hour=self.settings.send_window_start_hour_utc,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        if not include_today or candidate <= current:
+            candidate += timedelta(days=1)
+        while self.settings.send_weekdays_only and candidate.weekday() >= 5:
+            candidate += timedelta(days=1)
+        return candidate
 
     def _publish_report(
         self,

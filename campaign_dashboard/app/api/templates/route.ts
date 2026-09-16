@@ -1,18 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseRequest } from "../../lib/supabase-admin";
-import { ensureDefaultEmailFooter } from "../../lib/email-content";
+import {
+  ensureDefaultEmailFooter,
+  normalizeTemplateVariables,
+} from "../../lib/email-content";
 
 export async function POST(request: NextRequest) {
   try {
     const input = (await request.json()) as TemplateInput;
     const name = input.name?.trim();
-    const subject = input.subject_template?.trim();
+    const subjectDraft = input.subject_template?.trim();
+    const subject = subjectDraft ? normalizeTemplateVariables(subjectDraft) : "";
     const bodyDraft = input.body_template?.trim();
-    const body = bodyDraft ? ensureDefaultEmailFooter(bodyDraft) : "";
+    const body = bodyDraft
+      ? ensureDefaultEmailFooter(normalizeTemplateVariables(bodyDraft))
+      : "";
     const followups = (input.followups || []).map((step) => ({
       delay_days: Number(step.delay_days),
       body_template: step.body_template?.trim()
-        ? ensureDefaultEmailFooter(step.body_template)
+        ? ensureDefaultEmailFooter(normalizeTemplateVariables(step.body_template))
         : "",
     }));
 

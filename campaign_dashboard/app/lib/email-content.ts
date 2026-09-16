@@ -83,11 +83,46 @@ export function ensureDefaultEmailFooter(value: string) {
   return `${EMAIL_SHELL_OPEN}\n${message}\n${DEFAULT_EMAIL_FOOTER_HTML}\n</div>`;
 }
 
+const TEMPLATE_VARIABLE_PATTERN = /{{\s*([^{}]+?)\s*}}/g;
+
+const TEMPLATE_VARIABLE_ALIASES: Record<string, string> = {
+  firstname: "first_name",
+  first_name: "first_name",
+  lastname: "last_name",
+  last_name: "last_name",
+  company: "company",
+  email: "email",
+  yourname: "sender_name",
+  your_name: "sender_name",
+  sendername: "sender_name",
+  sender_name: "sender_name",
+};
+
+function variableKey(value: string) {
+  const raw = value.trim().toLowerCase();
+  const normalized = raw.replace(/[\s-]+/g, "_");
+  const compact = raw.replace(/[^a-z0-9]/g, "");
+  return TEMPLATE_VARIABLE_ALIASES[normalized] || TEMPLATE_VARIABLE_ALIASES[compact];
+}
+
+export function normalizeTemplateVariables(value: string) {
+  return value.replace(TEMPLATE_VARIABLE_PATTERN, (_match, rawKey: string) => {
+    const key = variableKey(rawKey);
+    return key ? `{{${key}}}` : "";
+  });
+}
+
 export function personalizeEmailHtml(
   value: string,
   recipient: { firstName?: string | null; company?: string | null },
 ) {
-  return value
-    .replaceAll("{{first_name}}", recipient.firstName?.trim() || "Jordan")
-    .replaceAll("{{company}}", recipient.company?.trim() || "Acme Company");
+  const variables: Record<string, string> = {
+    first_name: recipient.firstName?.trim() || "there",
+    company: recipient.company?.trim() || "your agency",
+    sender_name: "Anthony",
+  };
+  return value.replace(TEMPLATE_VARIABLE_PATTERN, (_match, rawKey: string) => {
+    const key = variableKey(rawKey);
+    return key ? variables[key] || "" : "";
+  });
 }

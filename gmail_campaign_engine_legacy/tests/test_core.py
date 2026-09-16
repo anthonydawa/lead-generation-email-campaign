@@ -23,6 +23,11 @@ def make_settings() -> Settings:
         MIN_DELAY_SECONDS=0,
         MAX_DELAY_SECONDS=0,
         DAILY_SEND_LIMIT=10,
+        DAILY_NEW_RECIPIENT_LIMIT=10,
+        FIRST_DAY_NEW_RECIPIENT_LIMIT=10,
+        SEND_WINDOW_START_HOUR_UTC=0,
+        SEND_WINDOW_END_HOUR_UTC=24,
+        SEND_WEEKDAYS_ONLY=False,
     )
 
 
@@ -90,7 +95,14 @@ class SenderTests(unittest.TestCase):
             "Hello {{ first_name }} at {{company}} / {{unknown}}",
             {"first_name": "Ada", "company": None},
         )
-        self.assertEqual(rendered, "Hello Ada at  / ")
+        self.assertEqual(rendered, "Hello Ada at your agency / ")
+
+    def test_template_rendering_accepts_human_readable_aliases(self) -> None:
+        rendered = render_template(
+            "Hi {{First Name}} from {{Company}} — {{Your Name}} / {{unknown tag}}",
+            {"first_name": "Ada", "company": None},
+        )
+        self.assertEqual(rendered, "Hi Ada from your agency — Anthony / ")
 
     @patch("sender_engine.time.sleep")
     def test_successful_campaign(self, sleep: Mock) -> None:
