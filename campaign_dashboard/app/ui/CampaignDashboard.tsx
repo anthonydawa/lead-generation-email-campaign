@@ -278,6 +278,7 @@ const initialData: DashboardData = {
 };
 
 export function CampaignDashboard() {
+  const initialSyncStarted = useRef(false);
   const [tab, setTab] = useState<Tab>("finder");
   const [data, setData] = useState(initialData);
   const [savedProspects, setSavedProspects] = useState<Prospect[]>([]);
@@ -345,10 +346,42 @@ export function CampaignDashboard() {
     }
   }
 
+  async function syncMasterSheetOnOpen() {
+    try {
+      const response = await fetch("/api/lead-import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sync_master_sheet: true }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(
+          payload.error || "Unable to sync the master Google Sheet.",
+        );
+      }
+      if (payload.imported > 0) {
+        setNotice(
+          `Master sheet sync added ${payload.imported} newly verified lead${payload.imported === 1 ? "" : "s"}.`,
+        );
+        await loadData();
+      }
+    } catch (syncError) {
+      setNotice(
+        `Automatic master-sheet sync could not finish: ${
+          syncError instanceof Error ? syncError.message : "Unknown error"
+        }`,
+      );
+    }
+  }
+
   useEffect(() => {
+    if (initialSyncStarted.current) return;
+    initialSyncStarted.current = true;
     // Initial workspace synchronization; later refreshes are user initiated.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadData();
+    void syncMasterSheetOnOpen();
+    // Both functions are intentionally run once for each dashboard mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const metrics = useMemo(() => {

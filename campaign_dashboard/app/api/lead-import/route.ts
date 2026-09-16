@@ -63,36 +63,38 @@ export async function POST(request: NextRequest) {
         row.contact_name.trim().split(/\s+/).length > 1 &&
         Boolean(row.business_email),
     );
-    const verifiedCandidates = structurallyValid.filter((row) =>
+    const validEmailRows = normalized.filter((row) =>
+      Boolean(row.business_email),
+    );
+    const verifiedEmailRows = validEmailRows.filter((row) =>
       isThirdPartyEmailVerified(
         row.email_status,
         row.third_party_email_verified,
       ),
     );
-    const rejectedInvalid = rows.length - structurallyValid.length;
-    const rejectedUnverified = structurallyValid.length - verifiedCandidates.length;
+    // A master-sheet sync promotes every verified email to Relay's lead list.
+    // Rich prospect records still require the company/contact fields used by the
+    // research library, but those optional fields must not block email delivery.
+    const verifiedCandidates = masterSheetSync
+      ? verifiedEmailRows
+      : structurallyValid.filter((row) =>
+          isThirdPartyEmailVerified(
+            row.email_status,
+            row.third_party_email_verified,
+          ),
+        );
+    const rejectedInvalid = masterSheetSync
+      ? rows.length - validEmailRows.length
+      : rows.length - structurallyValid.length;
+    const rejectedUnverified = masterSheetSync
+      ? validEmailRows.length - verifiedEmailRows.length
+      : structurallyValid.length - verifiedCandidates.length;
     const sourceFile = masterSheetSync
       ? `${MASTER_LEAD_SHEET_NAME} / Leads`
       : clean(input.source_file, 255) || "uploaded-spreadsheet.csv";
     const batchLabel = masterSheetSync
       ? `Master Google Sheet sync · ${new Date().toISOString().slice(0, 10)}`
       : clean(input.batch_label, 120) || sourceFile || "Uploaded spreadsheet";
-    const batches = await supabaseRequest<Array<{ id: string }>>(
-      "lead_import_batches",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          source_file: sourceFile,
-          label: batchLabel,
-          total_rows: rows.length,
-          imported_rows: 0,
-        }),
-        prefer: "return=representation",
-      },
-    );
-    const batchId = batches[0]?.id;
-    if (!batchId) throw new Error("Unable to create the import batch.");
-
     const contactImport = await promoteEmailContacts(
       verifiedCandidates,
       batchLabel,
@@ -101,20 +103,28 @@ export async function POST(request: NextRequest) {
       contactImport.inserted.map((contact) => contact.email.toLowerCase()),
     );
     const acceptedEmails = new Set<string>();
-    const acceptedRows = verifiedCandidates.filter((row) => {
+    const acceptedEmailRows = verifiedCandidates.filter((row) => {
       const email = String(row.business_email || "").toLowerCase();
       if (!insertedEmails.has(email) || acceptedEmails.has(email)) return false;
       acceptedEmails.add(email);
       return true;
     });
-    await supabaseRequest(
-      `lead_import_batches?id=eq.${encodeURIComponent(batchId)}`,
-      {
-        method: "PATCH",
-        body: JSON.stringify({ imported_rows: acceptedRows.length }),
-        prefer: "return=minimal",
-      },
+    const acceptedRows = acceptedEmailRows.filter((row) =>
+      structurallyValid.includes(row),
     );
+    const batches = acceptedEmailRows.length
+      ? await supabaseRequest<Array<{ id: string }>>("lead_import_batches", {
+          method: "POST",
+          body: JSON.stringify({
+            source_file: sourceFile,
+            label: batchLabel,
+            total_rows: rows.length,
+            imported_rows: acceptedEmailRows.length,
+          }),
+          prefer: "return=representation",
+        })
+      : [];
+    const batchId = batches[0]?.id || null;
 
     const saved = acceptedRows.length
       ? await supabaseRequest<ImportedProspect[]>(
@@ -134,18 +144,20 @@ export async function POST(request: NextRequest) {
           },
         )
       : [];
-    const skippedDuplicates = verifiedCandidates.length - acceptedRows.length;
+    const skippedDuplicates =
+      verifiedCandidates.length - acceptedEmailRows.length;
 
     return NextResponse.json({
       batch_id: batchId,
-      imported: saved.length,
-      skipped: rows.length - acceptedRows.length,
+      imported: acceptedEmailRows.length,
+      imported_prospects: saved.length,
+      skipped: rows.length - acceptedEmailRows.length,
       skipped_duplicates: skippedDuplicates,
       rejected_unverified: rejectedUnverified,
       rejected_invalid: rejectedInvalid,
       prospects: saved,
-      email_contacts: acceptedRows.length,
-      verified_contacts: acceptedRows.length,
+      email_contacts: acceptedEmailRows.length,
+      verified_contacts: acceptedEmailRows.length,
       queued_for_validation: 0,
       queued_for_find_email: 0,
       sync_source: masterSheetSync ? MASTER_LEAD_SHEET_NAME : null,
