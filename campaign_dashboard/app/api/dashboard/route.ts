@@ -7,7 +7,7 @@ export async function GET() {
   try {
     const [leads, campaigns, logs, templates] = await Promise.all([
       supabaseRequest<Lead[]>(
-        "leads?select=id,email,first_name,last_name,company,validation_status,status,batch_label,created_at&order=created_at.desc&limit=500",
+        "leads?select=id,email,first_name,last_name,company,validation_status,status,batch_label,created_at&order=created_at.desc&limit=5000",
       ),
       supabaseRequest<Campaign[]>(
         "campaigns?select=id,title,subject_template,body_template,message_template_id,initial_send_at,timezone,sender_email,status,created_at&order=created_at.desc&limit=100",
