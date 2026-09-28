@@ -31,6 +31,8 @@ export function masterLeadSheetCsvUrl() {
   const query = new URLSearchParams({
     tqx: "out:csv",
     sheet: MASTER_LEAD_SHEET_TAB,
+    // Without an explicit header count, Google may treat data rows as headers.
+    headers: "1",
   });
   return `https://docs.google.com/spreadsheets/d/${MASTER_LEAD_SHEET_ID}/gviz/tq?${query}`;
 }
